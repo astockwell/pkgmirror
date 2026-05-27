@@ -55,6 +55,19 @@ go get example.com/foo@v1.0.0
 
 Browse the UI at <http://localhost:8080/>.
 
+## Testing
+
+```sh
+make test            # fast unit / grey-box tests (no docker)
+make test-blackbox   # full conformance suite (needs docker)
+```
+
+The black-box suite runs each ecosystem's real client (e.g. `go`,
+eventually `npm`, `pip`, …) inside official docker images against a
+containerized `pkgmirror`. See
+[`docs/blackbox-testing.md`](docs/blackbox-testing.md) for the design and
+"how to add a new format" guide.
+
 ## Project layout
 
 ```

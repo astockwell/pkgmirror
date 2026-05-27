@@ -5,6 +5,46 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-27 — Black-box conformance via dockerized native clients
+
+**Decision:** Conformance for each package format is validated by running the
+real ecosystem client (`go`, `npm`, `pip`, `mvn`, …) in an official docker
+container against a `pkgmirror` container, both on a per-test private docker
+network. Orchestration uses
+[`testcontainers-go`](https://golang.testcontainers.org/). All black-box
+files are gated behind `//go:build blackbox`, so the default
+`go test ./...` stays sub-second and CI-friendly even without docker.
+
+**Rationale:** the only reliable way to prove wire-format compatibility
+with an ecosystem is to drive its actual client. Containerizing both sides
+eliminates "works on my mac because brew installed npm 10 but CI has 18"
+drift and makes the test identical locally and on any CI runner with a
+docker daemon. testcontainers' Ryuk reaper guarantees cleanup even on
+crashed test processes.
+
+**Implementation notes:**
+
+- Dockerfile is intentionally BuildKit-free (no `--mount=type=cache`) so the
+  legacy docker daemon builder used by testcontainers-go v0.42 can build it.
+  Layer caching across runs is still good enough.
+- `Client.Exec` wraps each command in `sh -c '… 2>&1'` and uses
+  `tcexec.Multiplexed()` so callers receive a clean text stream instead of
+  docker's framed stdout/stderr multiplex.
+- See [`docs/blackbox-testing.md`](docs/blackbox-testing.md) for the full
+  contract and "how to add a new format" guide.
+
+**Validation:** `make test-blackbox` builds the pkgmirror image (~1 min cold,
+seconds warm), brings up a `golang:1.22-bookworm` client container, drives
+`go mod download` / `go list -m -versions` / `go build` against the mirror,
+and runs the resulting binary. Two tests cover single-version and
+multi-version flows.
+
+**Revisit when:** we want a multi-version client matrix (e.g. test against
+go 1.21 *and* 1.22), or want to test directly through the official
+`GOPROXY` redirection behavior.
+
+---
+
 ## 2026-05-27 — Build a fresh service, do not vendor Forgejo
 
 **Decision:** Treat the spec's "Fork the Forgejo project and extract the package

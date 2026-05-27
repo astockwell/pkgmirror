@@ -1,0 +1,12 @@
+# Keep the docker build context minimal.
+.git
+.github
+.gitignore
+.DS_Store
+*.md
+docs/
+data/
+tests/
+**/testdata/
+Dockerfile
+.dockerignore
