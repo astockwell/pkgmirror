@@ -5,6 +5,73 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-27 — Multi-tenancy, users, and token auth
+
+**Decision:** Introduce three new concepts and require an authenticated
+identity for non-public reads and all writes:
+
+- **`tenants`** — flat namespaces, primary key on `(tenant_id, type, name)`.
+  Tenant name appears in URLs: `/api/packages/<tenant>/<format>/…`. Each
+  tenant has a `visibility` (`private` / `public`).
+- **`users`** — principals, either `human` or `service`. Decoupled from
+  tenants so one user can belong to multiple tenants with different roles.
+  `external_provider` + `external_subject` columns are forward-compat for
+  OIDC/LDAP without forcing those today.
+- **`tenant_members`** — many-to-many between users and tenants with a role
+  (`reader` / `writer` / `tenant_admin`).
+- **`tokens`** — opaque `pkm_<32 base32>` bearer strings, stored as
+  `sha256(plaintext)` hex. Carry CSV scopes (`read`, `write`, `admin`) and
+  optional `tenant_scope` + `expires_unix`.
+
+Auth flows through the new `auth.Authenticator` interface; today's only
+implementation is `TokenAuthenticator`. Future identity sources (OIDC,
+LDAP, reverse-proxy header, mTLS) slot in alongside without handler
+changes. See `docs/auth.md` for the full spec.
+
+**Rationale:** the user confirmed multi-tenant isolation is a v1
+requirement. Separating users from tenants (rather than collapsing both
+into a Forgejo-style polymorphic `User` row) keeps the model crisp and
+makes the OIDC/audit story straightforward.
+
+**Crypto note:** SHA-256 (not bcrypt) for token hashing. Tokens have ~160
+bits of entropy from `crypto/rand` — rainbow tables and brute force are
+irrelevant; bcrypt would only add cost without security. This matches how
+GitHub stores `ghp_…` PATs.
+
+**Bootstrap:** on every start, `internal/bootstrap.Ensure` idempotently
+creates the `admin` service user, the `default` tenant (with visibility
+from `PKGMIRROR_DEFAULT_TENANT_VISIBILITY`), the admin → default
+membership, and an initial admin token (from `PKGMIRROR_ADMIN_TOKEN` or
+freshly minted and printed once to stderr).
+
+**Migrations:** new `migrations` slice in `internal/db/db.go` driven by
+`PRAGMA user_version`. v1 is the original schema; v2 adds tenants/users/
+members/tokens and rewrites `packages` with the new `UNIQUE(tenant_id,
+type, lower_name)` constraint. SQLite WAL was dropped from the DSN because
+modernc.org/sqlite leaves `-wal`/`-shm` files past `Close()`, breaking
+test cleanup; default rollback journaling is fine for our single-writer
+workload.
+
+**Known limitation:** in black-box tests we default the tenant to
+`public` because the Go toolchain refuses to send Basic-auth credentials
+over plain HTTP (a hardcoded rule, not configurable via GOAUTH/netrc/URL).
+Production deploys must terminate TLS in front of pkgmirror for `go` (and
+several other clients) to send credentials. Auth-gate behavior is
+exhaustively covered by the in-process unit tests, which have no transport
+restriction. See `docs/auth.md` "Per-format credential supply" for the
+detail.
+
+**Validation:** unit + black-box conformance suites pass. The blackbox
+suite covers: anonymous read on public tenant succeeds; upload without
+token returns 401; `go mod download`/`go build`/run flow works against
+the real `golang:1.22-bookworm` client.
+
+**Revisit when:** we add OIDC, web sessions, a token CRUD API, or per-
+package visibility (currently only per-tenant). Also when we decide on
+TLS termination — built-in vs always-via-proxy.
+
+---
+
 ## 2026-05-27 — Black-box conformance via dockerized native clients
 
 **Decision:** Conformance for each package format is validated by running the

@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// UploadBytes PUTs body to <pkgmirror>/<path> via the host-side URL and
-// fails the test on a non-2xx response.
+// UploadBytes PUTs body to <pkgmirror>/<path> via the host-side URL using
+// the stack's admin Bearer token, failing the test on a non-2xx response.
 func UploadBytes(t *testing.T, s *Stack, path string, contentType string, body []byte) {
 	t.Helper()
 	url := s.HostBaseURL + path
@@ -25,6 +25,9 @@ func UploadBytes(t *testing.T, s *Stack, path string, contentType string, body [
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
+	}
+	if s.AdminToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.AdminToken)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

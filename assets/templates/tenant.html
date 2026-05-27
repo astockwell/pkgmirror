@@ -1,0 +1,40 @@
+{{template "head" .}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/">Tenants</a></li>
+        <li class="breadcrumb-item active"><code class="mono">{{.Tenant.Name}}</code></li>
+    </ol>
+</nav>
+
+<div class="mb-3">
+    <span class="badge text-bg-{{if eq .Visibility "public"}}success{{else}}secondary{{end}}">{{.Visibility}}</span>
+</div>
+
+{{if .Packages}}
+<table class="table table-sm table-hover">
+    <thead>
+        <tr>
+            <th>Type</th>
+            <th>Name</th>
+            <th>Created</th>
+        </tr>
+    </thead>
+    <tbody>
+    {{range .Packages}}
+        <tr>
+            <td><span class="badge text-bg-secondary">{{.Type}}</span></td>
+            <td><a href="{{.URL}}"><code class="mono">{{.Name}}</code></a></td>
+            <td><small class="text-muted">{{.Created}}</small></td>
+        </tr>
+    {{end}}
+    </tbody>
+</table>
+{{else}}
+<div class="alert alert-info mb-0">
+    <p class="mb-2">No packages in this tenant yet. Upload one (Go example):</p>
+    <pre class="mb-0"><code>curl -X PUT -u user:&lt;TOKEN&gt; --data-binary @example.com_foo_v1.0.0.zip \
+  http://localhost:8080/api/packages/{{.Tenant.Name}}/go/upload</code></pre>
+</div>
+{{end}}
+
+{{template "tail" .}}

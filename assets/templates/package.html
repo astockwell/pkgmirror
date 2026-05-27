@@ -1,7 +1,8 @@
 {{template "head" .}}
 <nav aria-label="breadcrumb">
     <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a href="/">Packages</a></li>
+        <li class="breadcrumb-item"><a href="/">Tenants</a></li>
+        <li class="breadcrumb-item"><a href="/t/{{.Tenant.Name}}"><code class="mono">{{.Tenant.Name}}</code></a></li>
         <li class="breadcrumb-item"><span class="badge text-bg-secondary">{{.Package.Type}}</span></li>
         <li class="breadcrumb-item active"><code class="mono">{{.Package.Name}}</code></li>
     </ol>
@@ -48,7 +49,7 @@
         <pre class="gomod"><code>{{.GoMod}}</code></pre>
 
         <h6 class="mt-4">Use it</h6>
-        <pre><code>GOPROXY=http://{{"<host>"}}/api/packages/go go get {{$.Package.Name}}@{{$.Selected.Version}}</code></pre>
+        <pre><code>GOPROXY=http://user:&lt;TOKEN&gt;@{{"<host>"}}/api/packages/{{$.Tenant.Name}}/go go get {{$.Package.Name}}@{{$.Selected.Version}}</code></pre>
         {{end}}
 
         {{else}}

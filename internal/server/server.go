@@ -1,5 +1,5 @@
-// Package server wires the Gin engine, templates, and route handlers
-// together.
+// Package server wires the Gin engine, templates, auth middleware, and
+// route handlers together.
 package server
 
 import (
@@ -8,36 +8,44 @@ import (
 	"io/fs"
 	"net/http"
 
+	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
 	"github.com/astockwell/pkgmirror/internal/packages/goproxy"
+	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/ui"
 
 	"github.com/gin-gonic/gin"
 )
 
+// Deps bundles the dependencies needed to construct an engine.
+type Deps struct {
+	Service       *pkgsvc.Service
+	Models        *models.Store
+	Tenants       *tenants.Store
+	Authenticator auth.Authenticator
+	Templates     fs.FS
+}
+
 // New constructs a configured *gin.Engine.
-//
-// templates is a filesystem (typically embed.FS via fs.Sub) containing the
-// HTML templates relative to its root.
-func New(svc *pkgsvc.Service, m *models.Store, templates fs.FS) (*gin.Engine, error) {
+func New(d Deps) (*gin.Engine, error) {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
+	r.Use(auth.Middleware(d.Authenticator))
 
 	tmpl, err := template.New("").Funcs(template.FuncMap{
 		"humanBytes": humanBytes,
-	}).ParseFS(templates, "*.html")
+	}).ParseFS(d.Templates, "*.html")
 	if err != nil {
 		return nil, err
 	}
 	r.SetHTMLTemplate(tmpl)
 
-	// API routes — Go module proxy
-	goGroup := r.Group("/api/packages/go")
-	goproxy.NewHandler(svc, m).Register(goGroup)
+	// Format-specific API groups: /api/packages/:tenant/<format>/...
+	goGroup := r.Group("/api/packages/:tenant/go")
+	goproxy.NewHandler(d.Service, d.Models, d.Tenants).Register(goGroup)
 
-	// UI
-	ui.New(svc, m).Register(r)
+	ui.New(d.Service, d.Models, d.Tenants).Register(r)
 
 	r.NoRoute(func(c *gin.Context) {
 		c.String(http.StatusNotFound, "not found")
@@ -46,7 +54,6 @@ func New(svc *pkgsvc.Service, m *models.Store, templates fs.FS) (*gin.Engine, er
 	return r, nil
 }
 
-// humanBytes formats a byte size for display (e.g. 1.4 MiB).
 func humanBytes(n int64) string {
 	const unit = 1024
 	if n < unit {
@@ -62,7 +69,6 @@ func humanBytes(n int64) string {
 }
 
 func formatBytes(v float64, suffix string) string {
-	// Two decimal places, trimmed.
 	s := fmt.Sprintf("%.2f", v)
 	for len(s) > 0 && s[len(s)-1] == '0' {
 		s = s[:len(s)-1]

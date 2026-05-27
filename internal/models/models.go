@@ -36,9 +36,11 @@ var (
 	ErrDuplicatePackageVersion = errors.New("package version already exists")
 )
 
-// Package represents a logical package (a name within a format).
+// Package represents a logical package (a name within a format) belonging
+// to a tenant.
 type Package struct {
 	ID          int64
+	TenantID    int64
 	Type        Type
 	Name        string
 	LowerName   string
@@ -94,11 +96,11 @@ func New(db *sql.DB) *Store { return &Store{DB: db} }
 
 // ----- Packages -----
 
-// GetOrCreatePackage returns the package with the given type+name, creating
-// it if needed.
-func (s *Store) GetOrCreatePackage(ctx context.Context, t Type, name string) (*Package, error) {
+// GetOrCreatePackage returns the package within the given tenant matching
+// (type, name), creating it if needed.
+func (s *Store) GetOrCreatePackage(ctx context.Context, tenantID int64, t Type, name string) (*Package, error) {
 	lower := strings.ToLower(name)
-	if p, err := s.GetPackage(ctx, t, name); err == nil {
+	if p, err := s.GetPackage(ctx, tenantID, t, name); err == nil {
 		return p, nil
 	} else if !errors.Is(err, ErrPackageNotExist) {
 		return nil, err
@@ -106,28 +108,29 @@ func (s *Store) GetOrCreatePackage(ctx context.Context, t Type, name string) (*P
 
 	now := time.Now().Unix()
 	res, err := s.DB.ExecContext(ctx,
-		`INSERT INTO packages (type, name, lower_name, created_unix) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(type, lower_name) DO NOTHING`,
-		string(t), name, lower, now)
+		`INSERT INTO packages (tenant_id, type, name, lower_name, created_unix)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(tenant_id, type, lower_name) DO NOTHING`,
+		tenantID, string(t), name, lower, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert package: %w", err)
 	}
 	if id, _ := res.LastInsertId(); id > 0 {
-		return &Package{ID: id, Type: t, Name: name, LowerName: lower, CreatedUnix: now}, nil
+		return &Package{ID: id, TenantID: tenantID, Type: t, Name: name, LowerName: lower, CreatedUnix: now}, nil
 	}
 	// Conflict: another writer created it; re-read.
-	return s.GetPackage(ctx, t, name)
+	return s.GetPackage(ctx, tenantID, t, name)
 }
 
-// GetPackage looks up a package by type and name (case-insensitive).
-func (s *Store) GetPackage(ctx context.Context, t Type, name string) (*Package, error) {
+// GetPackage looks up a package by (tenant, type, name) case-insensitively.
+func (s *Store) GetPackage(ctx context.Context, tenantID int64, t Type, name string) (*Package, error) {
 	row := s.DB.QueryRowContext(ctx,
-		`SELECT id, type, name, lower_name, created_unix
-		   FROM packages WHERE type = ? AND lower_name = ?`,
-		string(t), strings.ToLower(name))
+		`SELECT id, tenant_id, type, name, lower_name, created_unix
+		   FROM packages WHERE tenant_id = ? AND type = ? AND lower_name = ?`,
+		tenantID, string(t), strings.ToLower(name))
 	p := &Package{}
 	var typ string
-	if err := row.Scan(&p.ID, &typ, &p.Name, &p.LowerName, &p.CreatedUnix); err != nil {
+	if err := row.Scan(&p.ID, &p.TenantID, &typ, &p.Name, &p.LowerName, &p.CreatedUnix); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrPackageNotExist
 		}
@@ -137,21 +140,32 @@ func (s *Store) GetPackage(ctx context.Context, t Type, name string) (*Package, 
 	return p, nil
 }
 
-// ListPackages returns all packages of the given type, ordered by name.
-// If t == "" all types are returned.
-func (s *Store) ListPackages(ctx context.Context, t Type) ([]*Package, error) {
+// ListPackages returns packages within a tenant. If tenantID == 0, all
+// tenants are included (admin-only callers should use this). If t == ""
+// all types are returned.
+func (s *Store) ListPackages(ctx context.Context, tenantID int64, t Type) ([]*Package, error) {
 	var (
 		rows *sql.Rows
 		err  error
 	)
-	if t == "" {
+	switch {
+	case tenantID == 0 && t == "":
 		rows, err = s.DB.QueryContext(ctx,
-			`SELECT id, type, name, lower_name, created_unix
-			   FROM packages ORDER BY lower_name ASC`)
-	} else {
+			`SELECT id, tenant_id, type, name, lower_name, created_unix
+			   FROM packages ORDER BY tenant_id, lower_name ASC`)
+	case tenantID == 0:
 		rows, err = s.DB.QueryContext(ctx,
-			`SELECT id, type, name, lower_name, created_unix
-			   FROM packages WHERE type = ? ORDER BY lower_name ASC`, string(t))
+			`SELECT id, tenant_id, type, name, lower_name, created_unix
+			   FROM packages WHERE type = ? ORDER BY tenant_id, lower_name ASC`, string(t))
+	case t == "":
+		rows, err = s.DB.QueryContext(ctx,
+			`SELECT id, tenant_id, type, name, lower_name, created_unix
+			   FROM packages WHERE tenant_id = ? ORDER BY lower_name ASC`, tenantID)
+	default:
+		rows, err = s.DB.QueryContext(ctx,
+			`SELECT id, tenant_id, type, name, lower_name, created_unix
+			   FROM packages WHERE tenant_id = ? AND type = ? ORDER BY lower_name ASC`,
+			tenantID, string(t))
 	}
 	if err != nil {
 		return nil, err
@@ -162,7 +176,7 @@ func (s *Store) ListPackages(ctx context.Context, t Type) ([]*Package, error) {
 	for rows.Next() {
 		p := &Package{}
 		var typ string
-		if err := rows.Scan(&p.ID, &typ, &p.Name, &p.LowerName, &p.CreatedUnix); err != nil {
+		if err := rows.Scan(&p.ID, &p.TenantID, &typ, &p.Name, &p.LowerName, &p.CreatedUnix); err != nil {
 			return nil, err
 		}
 		p.Type = Type(typ)

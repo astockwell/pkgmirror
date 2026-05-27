@@ -19,6 +19,16 @@ import (
 // reachable from sibling containers on the same docker network.
 const pkgmirrorAlias = "pkgmirror"
 
+// bootstrapAdminToken is a fixed plaintext admin token injected via
+// PKGMIRROR_ADMIN_TOKEN. Black-box tests use it for uploads and reads
+// against private tenants. It is NOT a secret — it is regenerated for each
+// test process and only exists inside ephemeral docker containers.
+const bootstrapAdminToken = "pkm_blackboxtestadminadminadminadmi" // 32 base32 chars
+
+// DefaultTenant is the name of the tenant pkgmirror auto-creates on first
+// boot. Black-box tests use it as their playground.
+const DefaultTenant = "default"
+
 // Stack is a running pkgmirror container + its private docker network. Use
 // Stack.NewClient to bring up a sibling client container that can talk to
 // pkgmirror at InternalBaseURL.
@@ -30,6 +40,10 @@ type Stack struct {
 	// InternalBaseURL is reachable from sibling containers on the stack
 	// network. Always "http://pkgmirror:8080".
 	InternalBaseURL string
+
+	// AdminToken is the plaintext admin token usable for all reads/writes
+	// in the bootstrapped default tenant.
+	AdminToken string
 
 	// Network is the per-test docker network.
 	Network *testcontainers.DockerNetwork
@@ -64,7 +78,16 @@ func Start(ctx context.Context, t *testing.T) *Stack {
 			KeepImage:     true,
 		},
 		ExposedPorts: []string{"8080/tcp"},
-		Networks:     []string{net.Name},
+		Env: map[string]string{
+			"PKGMIRROR_ADMIN_TOKEN":                bootstrapAdminToken,
+			// Public default tenant so the go toolchain can fetch over
+			// plain HTTP without needing credentials (Go refuses to send
+			// auth headers over HTTP regardless of GOAUTH/netrc/URL).
+			// Auth-gate behavior on private tenants is exercised by the
+			// in-process tests in internal/packages/goproxy.
+			"PKGMIRROR_DEFAULT_TENANT_VISIBILITY": "public",
+		},
+		Networks: []string{net.Name},
 		NetworkAliases: map[string][]string{
 			net.Name: {pkgmirrorAlias},
 		},
@@ -99,6 +122,7 @@ func Start(ctx context.Context, t *testing.T) *Stack {
 	return &Stack{
 		HostBaseURL:     fmt.Sprintf("http://%s:%s", host, port.Port()),
 		InternalBaseURL: fmt.Sprintf("http://%s:8080", pkgmirrorAlias),
+		AdminToken:      bootstrapAdminToken,
 		Network:         net,
 		Container:       container,
 	}

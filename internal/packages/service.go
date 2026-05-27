@@ -119,20 +119,24 @@ func NewService(m *models.Store, s storage.Backend) *Service {
 
 // CreationInfo carries everything needed to ingest a single uploaded file.
 type CreationInfo struct {
-	PackageType       models.Type
-	PackageName       string
-	Version           string
-	VersionProperties map[string]string
+	TenantID            int64
+	PackageType         models.Type
+	PackageName         string
+	Version             string
+	VersionProperties   map[string]string
 	VersionMetadataJSON string
-	Filename          string
-	IsLead            bool
+	Filename            string
+	IsLead              bool
 }
 
 // CreatePackageAndAddFile creates (or fetches) the package, creates the
 // version (failing with models.ErrDuplicatePackageVersion if it already
 // exists), stores the bytes, and links them with a file row.
 func (s *Service) CreatePackageAndAddFile(ctx context.Context, info CreationInfo, buf *HashedBuffer) (*models.Package, *models.Version, *models.File, error) {
-	pkg, err := s.Models.GetOrCreatePackage(ctx, info.PackageType, info.PackageName)
+	if info.TenantID == 0 {
+		return nil, nil, nil, fmt.Errorf("CreatePackageAndAddFile: TenantID is required")
+	}
+	pkg, err := s.Models.GetOrCreatePackage(ctx, info.TenantID, info.PackageType, info.PackageName)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create package: %w", err)
 	}

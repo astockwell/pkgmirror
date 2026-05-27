@@ -4,33 +4,48 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/astockwell/pkgmirror/internal/tenants"
 )
 
 // Config holds runtime configuration for the pkgmirror service.
 type Config struct {
-	// Addr is the address the HTTP server listens on (e.g. ":8080").
-	Addr string
-
-	// DataDir is the root directory under which DB + blobs live by default.
+	Addr    string
 	DataDir string
-
-	// DBPath is the SQLite database file path.
-	DBPath string
-
-	// BlobDir is the root directory for the filesystem blob backend.
+	DBPath  string
 	BlobDir string
+
+	// AdminToken, if set, is installed as the admin token at bootstrap (if
+	// no admin token already exists). Empty = generate one on first boot.
+	AdminToken string
+
+	// DefaultTenantName is the tenant created on first boot.
+	DefaultTenantName string
+
+	// DefaultTenantVisibility controls anonymous read access to the default
+	// tenant. Parsed from PKGMIRROR_DEFAULT_TENANT_VISIBILITY = "private" or
+	// "public". Default: private.
+	DefaultTenantVisibility tenants.Visibility
 }
 
 // Load reads configuration from environment variables, applying defaults.
 func Load() Config {
 	dataDir := envOr("PKGMIRROR_DATA_DIR", "./data")
-	cfg := Config{
-		Addr:    envOr("PKGMIRROR_ADDR", ":8080"),
-		DataDir: dataDir,
-		DBPath:  envOr("PKGMIRROR_DB_PATH", filepath.Join(dataDir, "pkgmirror.db")),
-		BlobDir: envOr("PKGMIRROR_BLOB_DIR", filepath.Join(dataDir, "blobs")),
+	vis := tenants.VisibilityPrivate
+	switch strings.ToLower(envOr("PKGMIRROR_DEFAULT_TENANT_VISIBILITY", "private")) {
+	case "public":
+		vis = tenants.VisibilityPublic
 	}
-	return cfg
+	return Config{
+		Addr:                    envOr("PKGMIRROR_ADDR", ":8080"),
+		DataDir:                 dataDir,
+		DBPath:                  envOr("PKGMIRROR_DB_PATH", filepath.Join(dataDir, "pkgmirror.db")),
+		BlobDir:                 envOr("PKGMIRROR_BLOB_DIR", filepath.Join(dataDir, "blobs")),
+		AdminToken:              os.Getenv("PKGMIRROR_ADMIN_TOKEN"),
+		DefaultTenantName:       envOr("PKGMIRROR_DEFAULT_TENANT", "default"),
+		DefaultTenantVisibility: vis,
+	}
 }
 
 func envOr(key, fallback string) string {

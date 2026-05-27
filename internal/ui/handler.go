@@ -1,16 +1,19 @@
-// Package ui provides server-rendered Bootstrap-based pages for browsing
-// packages stored in the mirror.
+// Package ui renders Bootstrap-based HTML pages for browsing tenants and
+// the packages they contain.
 package ui
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
+	"github.com/astockwell/pkgmirror/internal/tenants"
 
 	"github.com/gin-gonic/gin"
 )
@@ -19,48 +22,95 @@ import (
 type Handler struct {
 	Service *pkgsvc.Service
 	Models  *models.Store
+	Tenants *tenants.Store
 }
 
 // New constructs a UI handler.
-func New(svc *pkgsvc.Service, m *models.Store) *Handler {
-	return &Handler{Service: svc, Models: m}
+func New(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store) *Handler {
+	return &Handler{Service: svc, Models: m, Tenants: ts}
 }
 
 // Register attaches UI routes to the engine.
 func (h *Handler) Register(r *gin.Engine) {
 	r.GET("/", h.index)
 	r.GET("/-/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
-	// /p/<type>/*name — package detail
-	r.GET("/p/:type/*name", h.packageOrVersion)
+	r.GET("/t/:tenant", h.tenantPage)
+	r.GET("/t/:tenant/p/:type/*name", h.packageOrVersion)
 }
 
-type packageRow struct {
-	Type     string
-	Name     string
-	URL      string
-	Created  string
-	VerCount int
+type tenantRow struct {
+	Name       string
+	URL        string
+	Visibility string
+	PkgCount   int
 }
 
 func (h *Handler) index(c *gin.Context) {
-	pkgs, err := h.Models.ListPackages(c.Request.Context(), "")
+	ctx := c.Request.Context()
+	allTenants, err := h.Tenants.List(ctx)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "%v", err)
+		return
+	}
+	id := auth.FromContext(c)
+
+	rows := make([]tenantRow, 0, len(allTenants))
+	for _, t := range allTenants {
+		visible := t.Visibility == tenants.VisibilityPublic ||
+			(id != nil && id.CanRead(t.ID))
+		if !visible {
+			continue
+		}
+		pkgs, err := h.Models.ListPackages(ctx, t.ID, "")
+		if err != nil {
+			c.String(http.StatusInternalServerError, "%v", err)
+			return
+		}
+		rows = append(rows, tenantRow{
+			Name:       t.Name,
+			URL:        "/t/" + t.Name,
+			Visibility: visibilityLabel(t.Visibility),
+			PkgCount:   len(pkgs),
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+
+	c.HTML(http.StatusOK, "index.html", gin.H{
+		"Title":   "pkgmirror — tenants",
+		"Tenants": rows,
+		"IsAuthed": id != nil,
+	})
+}
+
+type packageRow struct {
+	Type    string
+	Name    string
+	URL     string
+	Created string
+}
+
+func (h *Handler) tenantPage(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenant, err := h.Tenants.GetByName(ctx, c.Param("tenant"))
+	if err != nil {
+		h.handleTenantError(c, err)
+		return
+	}
+	if !auth.RequireRead(c, tenant) {
+		return
+	}
+	pkgs, err := h.Models.ListPackages(ctx, tenant.ID, "")
 	if err != nil {
 		c.String(http.StatusInternalServerError, "%v", err)
 		return
 	}
 	rows := make([]packageRow, 0, len(pkgs))
 	for _, p := range pkgs {
-		vs, err := h.Models.ListVersions(c.Request.Context(), p.ID)
-		if err != nil {
-			c.String(http.StatusInternalServerError, "%v", err)
-			return
-		}
 		rows = append(rows, packageRow{
-			Type:     string(p.Type),
-			Name:     p.Name,
-			URL:      "/p/" + string(p.Type) + "/" + p.Name,
-			Created:  time.Unix(p.CreatedUnix, 0).UTC().Format(time.RFC3339),
-			VerCount: len(vs),
+			Type:    string(p.Type),
+			Name:    p.Name,
+			URL:     fmt.Sprintf("/t/%s/p/%s/%s", tenant.Name, p.Type, p.Name),
+			Created: time.Unix(p.CreatedUnix, 0).UTC().Format(time.RFC3339),
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -69,9 +119,11 @@ func (h *Handler) index(c *gin.Context) {
 		}
 		return rows[i].Name < rows[j].Name
 	})
-	c.HTML(http.StatusOK, "index.html", gin.H{
-		"Title":    "pkgmirror — packages",
-		"Packages": rows,
+	c.HTML(http.StatusOK, "tenant.html", gin.H{
+		"Title":      tenant.Name + " — pkgmirror",
+		"Tenant":     tenant,
+		"Visibility": visibilityLabel(tenant.Visibility),
+		"Packages":   rows,
 	})
 }
 
@@ -88,25 +140,32 @@ type fileRow struct {
 }
 
 func (h *Handler) packageOrVersion(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenant, err := h.Tenants.GetByName(ctx, c.Param("tenant"))
+	if err != nil {
+		h.handleTenantError(c, err)
+		return
+	}
+	if !auth.RequireRead(c, tenant) {
+		return
+	}
 	typ := models.Type(c.Param("type"))
 	name := strings.TrimPrefix(c.Param("name"), "/")
-
-	// Optional version selector via query string for simplicity: /p/<type>/<name>?v=<version>
 	wantVersion := c.Query("v")
 
-	pkg, err := h.Models.GetPackage(c.Request.Context(), typ, name)
+	pkg, err := h.Models.GetPackage(ctx, tenant.ID, typ, name)
 	if err != nil {
 		if errors.Is(err, models.ErrPackageNotExist) {
 			c.HTML(http.StatusNotFound, "not_found.html", gin.H{
 				"Title":   "Package not found",
-				"Message": "No package " + string(typ) + "/" + name,
+				"Message": fmt.Sprintf("No package %s/%s in tenant %s", typ, name, tenant.Name),
 			})
 			return
 		}
 		c.String(http.StatusInternalServerError, "%v", err)
 		return
 	}
-	versions, err := h.Models.ListVersions(c.Request.Context(), pkg.ID)
+	versions, err := h.Models.ListVersions(ctx, pkg.ID)
 	if err != nil {
 		c.String(http.StatusInternalServerError, "%v", err)
 		return
@@ -118,7 +177,7 @@ func (h *Handler) packageOrVersion(c *gin.Context) {
 		verRows = append(verRows, versionRow{
 			Version: v.Version,
 			Created: time.Unix(v.CreatedUnix, 0).UTC().Format(time.RFC3339),
-			URL:     "/p/" + string(pkg.Type) + "/" + pkg.Name + "?v=" + v.Version,
+			URL:     fmt.Sprintf("/t/%s/p/%s/%s?v=%s", tenant.Name, pkg.Type, pkg.Name, v.Version),
 		})
 	}
 
@@ -137,7 +196,7 @@ func (h *Handler) packageOrVersion(c *gin.Context) {
 	var fileRows []fileRow
 	var goMod string
 	if selected != nil {
-		files, err := h.Models.ListFilesByVersion(c.Request.Context(), selected.ID)
+		files, err := h.Models.ListFilesByVersion(ctx, selected.ID)
 		if err != nil {
 			c.String(http.StatusInternalServerError, "%v", err)
 			return
@@ -146,13 +205,14 @@ func (h *Handler) packageOrVersion(c *gin.Context) {
 			size, sha, _ := h.fetchBlobMeta(c, f.BlobID)
 			fileRows = append(fileRows, fileRow{Name: f.Name, Size: size, SHA: sha})
 		}
-		if v, ok, err := h.Models.GetProperty(c.Request.Context(), models.PropertyRefVersion, selected.ID, "go.mod"); err == nil && ok {
+		if v, ok, err := h.Models.GetProperty(ctx, models.PropertyRefVersion, selected.ID, "go.mod"); err == nil && ok {
 			goMod = v
 		}
 	}
 
 	c.HTML(http.StatusOK, "package.html", gin.H{
 		"Title":    pkg.Name + " — pkgmirror",
+		"Tenant":   tenant,
 		"Package":  pkg,
 		"Versions": verRows,
 		"Selected": selected,
@@ -161,8 +221,17 @@ func (h *Handler) packageOrVersion(c *gin.Context) {
 	})
 }
 
-// fetchBlobMeta returns (size, sha256_hex) for a blob ID. Inline helper to
-// keep the UI handler self-contained.
+func (h *Handler) handleTenantError(c *gin.Context, err error) {
+	if errors.Is(err, tenants.ErrNotExist) {
+		c.HTML(http.StatusNotFound, "not_found.html", gin.H{
+			"Title":   "Tenant not found",
+			"Message": "No such tenant.",
+		})
+		return
+	}
+	c.String(http.StatusInternalServerError, "%v", err)
+}
+
 func (h *Handler) fetchBlobMeta(c *gin.Context, blobID int64) (int64, string, error) {
 	row := h.Models.DB.QueryRowContext(c.Request.Context(),
 		`SELECT size, hash_sha256 FROM package_blobs WHERE id = ?`, blobID)
@@ -174,4 +243,11 @@ func (h *Handler) fetchBlobMeta(c *gin.Context, blobID int64) (int64, string, er
 		return 0, "", err
 	}
 	return size, sha, nil
+}
+
+func visibilityLabel(v tenants.Visibility) string {
+	if v == tenants.VisibilityPublic {
+		return "public"
+	}
+	return "private"
 }

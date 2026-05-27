@@ -20,8 +20,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
+	"github.com/astockwell/pkgmirror/internal/tenants"
 
 	"github.com/gin-gonic/gin"
 )
@@ -31,14 +33,16 @@ import (
 type Handler struct {
 	Service *pkgsvc.Service
 	Models  *models.Store
+	Tenants *tenants.Store
 }
 
 // NewHandler constructs a Handler.
-func NewHandler(svc *pkgsvc.Service, m *models.Store) *Handler {
-	return &Handler{Service: svc, Models: m}
+func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store) *Handler {
+	return &Handler{Service: svc, Models: m, Tenants: ts}
 }
 
-// Register attaches the Go proxy routes to the given group. Endpoints:
+// Register attaches the Go proxy routes to the given group. The group is
+// expected to be already scoped to /api/packages/:tenant/go.
 //
 //	GET  /<module>/@v/list
 //	GET  /<module>/@v/<version>.info
@@ -48,28 +52,50 @@ func NewHandler(svc *pkgsvc.Service, m *models.Store) *Handler {
 //	PUT  /upload                (non-standard, mirror population)
 func (h *Handler) Register(g *gin.RouterGroup) {
 	g.PUT("/upload", h.upload)
-
-	// Catch-all for the proxy protocol. Gin's tree can't match
-	// "<arbitrary-segments>/@v/<file>" with a single pattern, so we use
-	// *path and split in code.
 	g.GET("/*path", h.proxy)
+}
+
+// tenantFromPath resolves the :tenant gin parameter to a tenant row, writing
+// a 404 to the response on failure.
+func (h *Handler) tenantFromPath(c *gin.Context) *tenants.Tenant {
+	name := c.Param("tenant")
+	if name == "" {
+		c.String(http.StatusNotFound, "tenant required")
+		return nil
+	}
+	t, err := h.Tenants.GetByName(c.Request.Context(), name)
+	if err != nil {
+		if errors.Is(err, tenants.ErrNotExist) {
+			c.String(http.StatusNotFound, "tenant %q not found", name)
+		} else {
+			c.String(http.StatusInternalServerError, "lookup tenant: %v", err)
+		}
+		return nil
+	}
+	return t
 }
 
 // proxy dispatches a single GET into one of the protocol operations.
 func (h *Handler) proxy(c *gin.Context) {
+	tenant := h.tenantFromPath(c)
+	if tenant == nil {
+		return
+	}
+	if !auth.RequireRead(c, tenant) {
+		return
+	}
+
 	raw := strings.TrimPrefix(c.Param("path"), "/")
 	if raw == "" {
 		c.String(http.StatusNotFound, "not found")
 		return
 	}
 
-	// @latest: /<module>/@latest
 	if i := strings.LastIndex(raw, "/@latest"); i != -1 && i+len("/@latest") == len(raw) {
-		h.latest(c, raw[:i])
+		h.latest(c, tenant, raw[:i])
 		return
 	}
 
-	// @v: /<module>/@v/<rest>
 	atV := "/@v/"
 	i := strings.LastIndex(raw, atV)
 	if i == -1 {
@@ -85,21 +111,20 @@ func (h *Handler) proxy(c *gin.Context) {
 
 	switch {
 	case rest == "list":
-		h.list(c, module)
+		h.list(c, tenant, module)
 	case strings.HasSuffix(rest, ".info"):
-		h.info(c, module, strings.TrimSuffix(rest, ".info"))
+		h.info(c, tenant, module, strings.TrimSuffix(rest, ".info"))
 	case strings.HasSuffix(rest, ".mod"):
-		h.mod(c, module, strings.TrimSuffix(rest, ".mod"))
+		h.mod(c, tenant, module, strings.TrimSuffix(rest, ".mod"))
 	case strings.HasSuffix(rest, ".zip"):
-		h.zip(c, module, strings.TrimSuffix(rest, ".zip"))
+		h.zip(c, tenant, module, strings.TrimSuffix(rest, ".zip"))
 	default:
 		c.String(http.StatusNotFound, "not found")
 	}
 }
 
-// list: GET <module>/@v/list — newline-separated versions.
-func (h *Handler) list(c *gin.Context, module string) {
-	pkg, err := h.Models.GetPackage(c.Request.Context(), models.TypeGo, module)
+func (h *Handler) list(c *gin.Context, tenant *tenants.Tenant, module string) {
+	pkg, err := h.Models.GetPackage(c.Request.Context(), tenant.ID, models.TypeGo, module)
 	if err != nil {
 		h.notFoundOrError(c, err)
 		return
@@ -116,14 +141,12 @@ func (h *Handler) list(c *gin.Context, module string) {
 	}
 }
 
-// info: GET <module>/@v/<version>.info — JSON {Version, Time}.
-func (h *Handler) info(c *gin.Context, module, version string) {
-	pkg, ver, err := h.resolve(c.Request.Context(), module, version)
+func (h *Handler) info(c *gin.Context, tenant *tenants.Tenant, module, version string) {
+	_, ver, err := h.resolve(c.Request.Context(), tenant.ID, module, version)
 	if err != nil {
 		h.notFoundOrError(c, err)
 		return
 	}
-	_ = pkg
 	c.JSON(http.StatusOK, struct {
 		Version string    `json:"Version"`
 		Time    time.Time `json:"Time"`
@@ -133,9 +156,8 @@ func (h *Handler) info(c *gin.Context, module, version string) {
 	})
 }
 
-// mod: GET <module>/@v/<version>.mod — go.mod contents.
-func (h *Handler) mod(c *gin.Context, module, version string) {
-	_, ver, err := h.resolve(c.Request.Context(), module, version)
+func (h *Handler) mod(c *gin.Context, tenant *tenants.Tenant, module, version string) {
+	_, ver, err := h.resolve(c.Request.Context(), tenant.ID, module, version)
 	if err != nil {
 		h.notFoundOrError(c, err)
 		return
@@ -153,9 +175,8 @@ func (h *Handler) mod(c *gin.Context, module, version string) {
 	_, _ = io.WriteString(c.Writer, goMod)
 }
 
-// zip: GET <module>/@v/<version>.zip — module zip bytes.
-func (h *Handler) zip(c *gin.Context, module, version string) {
-	_, ver, err := h.resolve(c.Request.Context(), module, version)
+func (h *Handler) zip(c *gin.Context, tenant *tenants.Tenant, module, version string) {
+	_, ver, err := h.resolve(c.Request.Context(), tenant.ID, module, version)
 	if err != nil {
 		h.notFoundOrError(c, err)
 		return
@@ -169,7 +190,6 @@ func (h *Handler) zip(c *gin.Context, module, version string) {
 		c.String(http.StatusNotFound, "no files")
 		return
 	}
-	// Convention: Go modules have a single lead .zip file per version.
 	var f *models.File
 	for _, candidate := range files {
 		if candidate.IsLead {
@@ -191,9 +211,8 @@ func (h *Handler) zip(c *gin.Context, module, version string) {
 	_, _ = io.Copy(c.Writer, rc)
 }
 
-// latest: GET <module>/@latest — JSON {Version, Time} for newest version.
-func (h *Handler) latest(c *gin.Context, module string) {
-	pkg, err := h.Models.GetPackage(c.Request.Context(), models.TypeGo, module)
+func (h *Handler) latest(c *gin.Context, tenant *tenants.Tenant, module string) {
+	pkg, err := h.Models.GetPackage(c.Request.Context(), tenant.ID, models.TypeGo, module)
 	if err != nil {
 		h.notFoundOrError(c, err)
 		return
@@ -212,8 +231,15 @@ func (h *Handler) latest(c *gin.Context, module string) {
 	})
 }
 
-// upload: PUT /upload — ingest a module zip and create package/version/file.
 func (h *Handler) upload(c *gin.Context) {
+	tenant := h.tenantFromPath(c)
+	if tenant == nil {
+		return
+	}
+	if !auth.RequireWrite(c, tenant) {
+		return
+	}
+
 	buf, err := pkgsvc.NewHashedBufferFromReader(c.Request.Body)
 	if err != nil {
 		c.String(http.StatusInternalServerError, "buffer upload: %v", err)
@@ -232,6 +258,7 @@ func (h *Handler) upload(c *gin.Context) {
 	}
 
 	_, _, _, err = h.Service.CreatePackageAndAddFile(c.Request.Context(), pkgsvc.CreationInfo{
+		TenantID:    tenant.ID,
 		PackageType: models.TypeGo,
 		PackageName: pkg.Name,
 		Version:     pkg.Version,
@@ -251,15 +278,14 @@ func (h *Handler) upload(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
+		"tenant":  tenant.Name,
 		"module":  pkg.Name,
 		"version": pkg.Version,
 	})
 }
 
-// resolve looks up the package by module path and the version (handling
-// "latest" specially), returning the typed records.
-func (h *Handler) resolve(ctx context.Context, module, version string) (*models.Package, *models.Version, error) {
-	pkg, err := h.Models.GetPackage(ctx, models.TypeGo, module)
+func (h *Handler) resolve(ctx context.Context, tenantID int64, module, version string) (*models.Package, *models.Version, error) {
+	pkg, err := h.Models.GetPackage(ctx, tenantID, models.TypeGo, module)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -277,7 +303,6 @@ func (h *Handler) resolve(ctx context.Context, module, version string) (*models.
 	return pkg, ver, nil
 }
 
-// notFoundOrError maps known sentinel errors to 404 and unknown errors to 500.
 func (h *Handler) notFoundOrError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, models.ErrPackageNotExist),

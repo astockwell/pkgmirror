@@ -12,15 +12,18 @@ import (
 	"time"
 
 	"github.com/astockwell/pkgmirror/assets"
+	"github.com/astockwell/pkgmirror/internal/auth"
+	"github.com/astockwell/pkgmirror/internal/bootstrap"
 	"github.com/astockwell/pkgmirror/internal/config"
 	pkgdb "github.com/astockwell/pkgmirror/internal/db"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
 	"github.com/astockwell/pkgmirror/internal/server"
 	"github.com/astockwell/pkgmirror/internal/storage"
+	"github.com/astockwell/pkgmirror/internal/tenants"
+	"github.com/astockwell/pkgmirror/internal/tokens"
+	"github.com/astockwell/pkgmirror/internal/users"
 )
-
-//
 
 func main() {
 	cfg := config.Load()
@@ -35,16 +38,51 @@ func main() {
 	}
 	defer dbConn.Close()
 
-	store := models.New(dbConn)
+	pkgModels := models.New(dbConn)
+	tenantStore := tenants.New(dbConn)
+	userStore := users.New(dbConn)
+	tokenStore := tokens.New(dbConn)
+
+	bootCtx, bootCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	res, err := bootstrap.Ensure(bootCtx, tenantStore, userStore, tokenStore, bootstrap.Options{
+		DefaultTenantName:       cfg.DefaultTenantName,
+		DefaultTenantVisibility: cfg.DefaultTenantVisibility,
+		AdminToken:              cfg.AdminToken,
+	})
+	bootCancel()
+	if err != nil {
+		log.Fatalf("bootstrap: %v", err)
+	}
+	if res.GeneratedAdminToken != "" {
+		log.Printf("======================================================================")
+		log.Printf("  pkgmirror generated an initial admin token.")
+		log.Printf("  This is shown ONCE — save it now; it cannot be recovered later.")
+		log.Printf("")
+		log.Printf("    %s", res.GeneratedAdminToken)
+		log.Printf("")
+		log.Printf("  Use it as the password for HTTP Basic auth, or as a Bearer token.")
+		log.Printf("======================================================================")
+	}
 
 	blobs, err := storage.NewFS(cfg.BlobDir)
 	if err != nil {
 		log.Fatalf("open blob storage: %v", err)
 	}
+	svc := pkgsvc.NewService(pkgModels, blobs)
 
-	svc := pkgsvc.NewService(store, blobs)
+	authn := &auth.TokenAuthenticator{
+		Tokens:  tokenStore,
+		Users:   userStore,
+		Tenants: tenantStore,
+	}
 
-	r, err := server.New(svc, store, assets.Templates())
+	r, err := server.New(server.Deps{
+		Service:       svc,
+		Models:        pkgModels,
+		Tenants:       tenantStore,
+		Authenticator: authn,
+		Templates:     assets.Templates(),
+	})
 	if err != nil {
 		log.Fatalf("build server: %v", err)
 	}
@@ -56,13 +94,13 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("pkgmirror listening on %s (db=%s, blobs=%s)", cfg.Addr, cfg.DBPath, cfg.BlobDir)
+		log.Printf("pkgmirror listening on %s (db=%s, blobs=%s, default-tenant=%s)",
+			cfg.Addr, cfg.DBPath, cfg.BlobDir, res.DefaultTenant.Name)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("server error: %v", err)
 		}
 	}()
 
-	// Graceful shutdown on SIGINT/SIGTERM.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop

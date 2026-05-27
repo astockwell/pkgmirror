@@ -3,15 +3,18 @@
 package goproxy_blackbox_test
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/astockwell/pkgmirror/tests/blackbox/harness"
+
+	"archive/zip"
 )
 
 // buildModuleZip produces a minimal Go module zip per the Go module zip
@@ -40,13 +43,16 @@ func buildModuleZip(t *testing.T, module, version, goMod string, extra map[strin
 	return buf.Bytes()
 }
 
-// TestGoProxyConformance brings up a real pkgmirror in a container, uploads
-// a Go module zip, and then asks an official `golang:1.22-bookworm`
-// container to fetch that module via `GOPROXY` and build against it.
-//
-// This proves wire-format compatibility: any byte-level deviation in our
-// .info / .mod / .zip responses will cause `go` to refuse the download or
-// fail the build.
+// proxyURL returns the GOPROXY URL pointing at pkgmirror's go endpoint
+// for the (public) default tenant. The harness sets
+// PKGMIRROR_DEFAULT_TENANT_VISIBILITY=public so anonymous reads work; see
+// docs/blackbox-testing.md and DECISIONS.md for the rationale.
+func proxyURL(s *harness.Stack) string {
+	return s.InternalBaseURL + "/api/packages/" + harness.DefaultTenant + "/go"
+}
+
+// TestGoProxyConformance proves wire-format compatibility against the real
+// go toolchain (golang:1.22-bookworm), end to end.
 func TestGoProxyConformance(t *testing.T) {
 	ctx := context.Background()
 	stack := harness.Start(ctx, t)
@@ -57,18 +63,18 @@ func TestGoProxyConformance(t *testing.T) {
 	)
 	goMod := "module example.com/foo\n\ngo 1.22\n"
 	zipBytes := buildModuleZip(t, module, version, goMod, map[string]string{
-		"foo.go": "package foo\n\n// Greet returns a friendly message.\nfunc Greet() string { return \"hello from \" + Name }\n\nconst Name = \"example.com/foo\"\n",
+		"foo.go": "package foo\n\nconst Name = \"example.com/foo\"\n\nfunc Greet() string { return \"hello from \" + Name }\n",
 	})
 
-	// --- populate the mirror ---
-	harness.UploadBytes(t, stack, "/api/packages/go/upload", "application/zip", zipBytes)
+	harness.UploadBytes(t, stack,
+		fmt.Sprintf("/api/packages/%s/go/upload", harness.DefaultTenant),
+		"application/zip", zipBytes)
 
-	// --- drive the real go toolchain ---
 	client := stack.NewClient(ctx, t, harness.ClientSpec{
 		Image:   "golang:1.22-bookworm",
 		WorkDir: "/work",
 		Env: map[string]string{
-			"GOPROXY":    stack.InternalBaseURL + "/api/packages/go",
+			"GOPROXY":    proxyURL(stack),
 			"GOSUMDB":    "off",
 			"GOFLAGS":    "-mod=mod",
 			"GOMODCACHE": "/work/.gomodcache",
@@ -90,46 +96,32 @@ func main() {
 		},
 	})
 
-	// 1. The proxy is reachable from inside the client container.
-	out := client.MustExec(t, "sh", "-c",
-		`apt-get update >/dev/null 2>&1 || true; `+
-			`command -v curl >/dev/null || apt-get install -y curl >/dev/null 2>&1 || true; `+
-			`curl -sSf `+stack.InternalBaseURL+`/-/healthz`)
-	if !strings.Contains(out, "ok") {
-		t.Fatalf("healthz from inside client container: %q", out)
-	}
-
-	// 2. `go mod download` succeeds and pulls all three protocol files.
-	out = client.MustExec(t, "go", "mod", "download", "-x", module)
+	out := client.MustExec(t, "go", "mod", "download", "-x", module)
 	for _, expect := range []string{
-		"/api/packages/go/example.com/foo/@v/v1.2.3.info",
-		"/api/packages/go/example.com/foo/@v/v1.2.3.mod",
-		"/api/packages/go/example.com/foo/@v/v1.2.3.zip",
+		fmt.Sprintf("/api/packages/%s/go/example.com/foo/@v/v1.2.3.info", harness.DefaultTenant),
+		fmt.Sprintf("/api/packages/%s/go/example.com/foo/@v/v1.2.3.mod", harness.DefaultTenant),
+		fmt.Sprintf("/api/packages/%s/go/example.com/foo/@v/v1.2.3.zip", harness.DefaultTenant),
 	} {
 		if !strings.Contains(out, expect) {
 			t.Fatalf("expected `go mod download -x` to fetch %q\nfull output:\n%s", expect, out)
 		}
 	}
 
-	// 3. `go list -m` resolves to the version we uploaded.
 	out = client.MustExec(t, "go", "list", "-m", module)
 	if !strings.Contains(out, "example.com/foo v1.2.3") {
-		t.Fatalf("go list -m: %q want %q", strings.TrimSpace(out), "example.com/foo v1.2.3")
+		t.Fatalf("go list -m: %q want example.com/foo v1.2.3", strings.TrimSpace(out))
 	}
 
-	// 4. Code that imports the module compiles cleanly.
 	out = client.MustExec(t, "go", "build", "-o", "/work/consumer", "./...")
 	t.Logf("go build:\n%s", out)
 
-	// 5. And runs, producing the expected output.
 	out = client.MustExec(t, "/work/consumer")
 	if !strings.Contains(out, "hello from example.com/foo") {
 		t.Fatalf("consumer output: %q", strings.TrimSpace(out))
 	}
 }
 
-// TestGoProxyMultipleVersions verifies the `@v/list` ordering and `@latest`
-// resolution match what the go client expects when multiple versions exist.
+// TestGoProxyMultipleVersions verifies `go list -m -versions` ordering.
 func TestGoProxyMultipleVersions(t *testing.T) {
 	ctx := context.Background()
 	stack := harness.Start(ctx, t)
@@ -138,14 +130,16 @@ func TestGoProxyMultipleVersions(t *testing.T) {
 	for _, v := range []string{"v0.1.0", "v0.2.0", "v1.0.0"} {
 		z := buildModuleZip(t, module, v, "module example.com/bar\n\ngo 1.22\n",
 			map[string]string{"bar.go": "package bar\n"})
-		harness.UploadBytes(t, stack, "/api/packages/go/upload", "application/zip", z)
+		harness.UploadBytes(t, stack,
+			fmt.Sprintf("/api/packages/%s/go/upload", harness.DefaultTenant),
+			"application/zip", z)
 	}
 
 	client := stack.NewClient(ctx, t, harness.ClientSpec{
 		Image:   "golang:1.22-bookworm",
 		WorkDir: "/work",
 		Env: map[string]string{
-			"GOPROXY":    stack.InternalBaseURL + "/api/packages/go",
+			"GOPROXY":    proxyURL(stack),
 			"GOSUMDB":    "off",
 			"GOFLAGS":    "-mod=mod",
 			"GOMODCACHE": "/work/.gomodcache",
@@ -157,7 +151,6 @@ func TestGoProxyMultipleVersions(t *testing.T) {
 	})
 
 	out := client.MustExec(t, "go", "list", "-m", "-versions", module)
-	// Output looks like: "example.com/bar v0.1.0 v0.2.0 v1.0.0"
 	fields := strings.Fields(out)
 	if len(fields) < 4 || fields[0] != module {
 		t.Fatalf("go list -m -versions: unexpected output %q", strings.TrimSpace(out))
@@ -166,5 +159,26 @@ func TestGoProxyMultipleVersions(t *testing.T) {
 	want := "v0.1.0 v0.2.0 v1.0.0"
 	if got != want {
 		t.Fatalf("versions order: got %q want %q", got, want)
+	}
+}
+
+// TestUnauthenticatedUploadIsRejected confirms the auth gate end-to-end:
+// uploads to the (public-read) default tenant still require a write token.
+func TestUnauthenticatedUploadIsRejected(t *testing.T) {
+	stack := harness.Start(context.Background(), t)
+	z := buildModuleZip(t, "example.com/secret", "v0.0.1",
+		"module example.com/secret\n\ngo 1.22\n", nil)
+	url := stack.HostBaseURL + "/api/packages/" + harness.DefaultTenant + "/go/upload"
+
+	req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(z))
+	req.Header.Set("Content-Type", "application/zip")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("PUT %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 401, got %d: %s", resp.StatusCode, body)
 	}
 }

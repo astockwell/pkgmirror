@@ -35,6 +35,9 @@ Environment variables:
 | `PKGMIRROR_DATA_DIR` | `./data` | root dir for SQLite db + blob storage |
 | `PKGMIRROR_DB_PATH` | `$DATA_DIR/pkgmirror.db` | SQLite db file path |
 | `PKGMIRROR_BLOB_DIR` | `$DATA_DIR/blobs` | filesystem blob storage root |
+| `PKGMIRROR_DEFAULT_TENANT` | `default` | name of the tenant auto-created on first boot |
+| `PKGMIRROR_DEFAULT_TENANT_VISIBILITY` | `private` | `private` or `public` (controls anonymous reads) |
+| `PKGMIRROR_ADMIN_TOKEN` | _(generated)_ | install this as the admin token; if unset, one is minted and printed once on first boot |
 | `PKGMIRROR_LOG_LEVEL` | `info` | (reserved) |
 
 ## Using the Go module proxy
@@ -42,16 +45,23 @@ Environment variables:
 Upload a Go module zip (per the [Go module zip format](https://go.dev/ref/mod#zip-files)):
 
 ```sh
-curl -X PUT --data-binary @example.com_foo_v1.0.0.zip \
-  http://localhost:8080/api/packages/go/upload
+curl -X PUT -u user:$PKGMIRROR_ADMIN_TOKEN \
+  --data-binary @example.com_foo_v1.0.0.zip \
+  http://localhost:8080/api/packages/default/go/upload
 ```
 
-Configure `go` to use it:
+Configure `go` to use it. **Note:** the `go` toolchain refuses to send
+Basic-auth credentials over plain HTTP; for private tenants, terminate TLS
+in front of pkgmirror. For public tenants, no client-side credentials are
+needed:
 
 ```sh
-export GOPROXY=http://localhost:8080/api/packages/go,direct
+export GOPROXY=http://localhost:8080/api/packages/default/go,direct
 go get example.com/foo@v1.0.0
 ```
+
+See [`docs/auth.md`](docs/auth.md) for the full auth model and per-format
+credential mechanics.
 
 Browse the UI at <http://localhost:8080/>.
 
