@@ -1,0 +1,32 @@
+{{template "head" .}}
+<h1 class="mb-4">Packages</h1>
+
+{{if .Packages}}
+<table class="table table-sm table-hover">
+    <thead>
+        <tr>
+            <th>Type</th>
+            <th>Name</th>
+            <th class="text-end">Versions</th>
+            <th>Created</th>
+        </tr>
+    </thead>
+    <tbody>
+    {{range .Packages}}
+        <tr>
+            <td><span class="badge text-bg-secondary">{{.Type}}</span></td>
+            <td><a href="{{.URL}}"><code class="mono">{{.Name}}</code></a></td>
+            <td class="text-end">{{.VerCount}}</td>
+            <td><small class="text-muted">{{.Created}}</small></td>
+        </tr>
+    {{end}}
+    </tbody>
+</table>
+{{else}}
+<div class="alert alert-info">
+    <p class="mb-2">No packages yet. Upload a Go module zip to get started:</p>
+    <pre class="mb-0"><code>curl -X PUT --data-binary @example.com_foo_v1.0.0.zip http://localhost:8080/api/packages/go/upload</code></pre>
+</div>
+{{end}}
+
+{{template "tail" .}}

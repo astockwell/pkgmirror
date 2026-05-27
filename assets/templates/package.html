@@ -1,0 +1,60 @@
+{{template "head" .}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/">Packages</a></li>
+        <li class="breadcrumb-item"><span class="badge text-bg-secondary">{{.Package.Type}}</span></li>
+        <li class="breadcrumb-item active"><code class="mono">{{.Package.Name}}</code></li>
+    </ol>
+</nav>
+
+<div class="row">
+    <div class="col-md-4">
+        <h5>Versions</h5>
+        {{if .Versions}}
+        <div class="list-group">
+        {{range .Versions}}
+            <a class="list-group-item list-group-item-action{{if and $.Selected (eq .Version $.Selected.Version)}} active{{end}}" href="{{.URL}}">
+                <div class="d-flex justify-content-between">
+                    <code class="mono">{{.Version}}</code>
+                    <small class="text-muted">{{.Created}}</small>
+                </div>
+            </a>
+        {{end}}
+        </div>
+        {{else}}
+        <p class="text-muted">No versions.</p>
+        {{end}}
+    </div>
+
+    <div class="col-md-8">
+        {{if .Selected}}
+        <h5>Version <code class="mono">{{.Selected.Version}}</code></h5>
+        <h6 class="mt-4">Files</h6>
+        <table class="table table-sm">
+            <thead><tr><th>Name</th><th>Size</th><th>SHA-256</th></tr></thead>
+            <tbody>
+            {{range .Files}}
+                <tr>
+                    <td><code class="mono">{{.Name}}</code></td>
+                    <td>{{humanBytes .Size}}</td>
+                    <td><small class="text-muted">{{.SHA}}</small></td>
+                </tr>
+            {{end}}
+            </tbody>
+        </table>
+
+        {{if and (eq (printf "%s" $.Package.Type) "go") .GoMod}}
+        <h6 class="mt-4">go.mod</h6>
+        <pre class="gomod"><code>{{.GoMod}}</code></pre>
+
+        <h6 class="mt-4">Use it</h6>
+        <pre><code>GOPROXY=http://{{"<host>"}}/api/packages/go go get {{$.Package.Name}}@{{$.Selected.Version}}</code></pre>
+        {{end}}
+
+        {{else}}
+        <p class="text-muted">Select a version.</p>
+        {{end}}
+    </div>
+</div>
+
+{{template "tail" .}}

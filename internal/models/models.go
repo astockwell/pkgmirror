@@ -1,0 +1,396 @@
+// Package models contains database access for packages, versions, files,
+// blobs, and properties.
+package models
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// Type identifies a package format (e.g. "go", "npm").
+type Type string
+
+const (
+	TypeGo Type = "go"
+)
+
+// PropertyRefType identifies the entity a property is attached to.
+type PropertyRefType int
+
+const (
+	PropertyRefPackage PropertyRefType = 0
+	PropertyRefVersion PropertyRefType = 1
+	PropertyRefFile    PropertyRefType = 2
+)
+
+// Sentinel errors.
+var (
+	ErrPackageNotExist        = errors.New("package does not exist")
+	ErrVersionNotExist        = errors.New("package version does not exist")
+	ErrFileNotExist           = errors.New("package file does not exist")
+	ErrBlobNotExist           = errors.New("package blob does not exist")
+	ErrDuplicatePackageVersion = errors.New("package version already exists")
+)
+
+// Package represents a logical package (a name within a format).
+type Package struct {
+	ID          int64
+	Type        Type
+	Name        string
+	LowerName   string
+	CreatedUnix int64
+}
+
+// Version represents a specific version of a package.
+type Version struct {
+	ID           int64
+	PackageID    int64
+	Version      string
+	LowerVersion string
+	MetadataJSON string
+	CreatedUnix  int64
+}
+
+// Blob represents the bytes of a stored object.
+type Blob struct {
+	ID          int64
+	Size        int64
+	HashMD5     string
+	HashSHA1    string
+	HashSHA256  string
+	HashSHA512  string
+	CreatedUnix int64
+}
+
+// File represents a file attached to a version, pointing at a blob.
+type File struct {
+	ID          int64
+	VersionID   int64
+	BlobID      int64
+	Name        string
+	LowerName   string
+	IsLead      bool
+	CreatedUnix int64
+}
+
+// Property is a key/value attached to a package, version, or file.
+type Property struct {
+	ID      int64
+	RefType PropertyRefType
+	RefID   int64
+	Name    string
+	Value   string
+}
+
+// Store wraps a *sql.DB and provides typed operations.
+type Store struct{ DB *sql.DB }
+
+// New returns a Store wrapping db.
+func New(db *sql.DB) *Store { return &Store{DB: db} }
+
+// ----- Packages -----
+
+// GetOrCreatePackage returns the package with the given type+name, creating
+// it if needed.
+func (s *Store) GetOrCreatePackage(ctx context.Context, t Type, name string) (*Package, error) {
+	lower := strings.ToLower(name)
+	if p, err := s.GetPackage(ctx, t, name); err == nil {
+		return p, nil
+	} else if !errors.Is(err, ErrPackageNotExist) {
+		return nil, err
+	}
+
+	now := time.Now().Unix()
+	res, err := s.DB.ExecContext(ctx,
+		`INSERT INTO packages (type, name, lower_name, created_unix) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(type, lower_name) DO NOTHING`,
+		string(t), name, lower, now)
+	if err != nil {
+		return nil, fmt.Errorf("insert package: %w", err)
+	}
+	if id, _ := res.LastInsertId(); id > 0 {
+		return &Package{ID: id, Type: t, Name: name, LowerName: lower, CreatedUnix: now}, nil
+	}
+	// Conflict: another writer created it; re-read.
+	return s.GetPackage(ctx, t, name)
+}
+
+// GetPackage looks up a package by type and name (case-insensitive).
+func (s *Store) GetPackage(ctx context.Context, t Type, name string) (*Package, error) {
+	row := s.DB.QueryRowContext(ctx,
+		`SELECT id, type, name, lower_name, created_unix
+		   FROM packages WHERE type = ? AND lower_name = ?`,
+		string(t), strings.ToLower(name))
+	p := &Package{}
+	var typ string
+	if err := row.Scan(&p.ID, &typ, &p.Name, &p.LowerName, &p.CreatedUnix); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrPackageNotExist
+		}
+		return nil, err
+	}
+	p.Type = Type(typ)
+	return p, nil
+}
+
+// ListPackages returns all packages of the given type, ordered by name.
+// If t == "" all types are returned.
+func (s *Store) ListPackages(ctx context.Context, t Type) ([]*Package, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if t == "" {
+		rows, err = s.DB.QueryContext(ctx,
+			`SELECT id, type, name, lower_name, created_unix
+			   FROM packages ORDER BY lower_name ASC`)
+	} else {
+		rows, err = s.DB.QueryContext(ctx,
+			`SELECT id, type, name, lower_name, created_unix
+			   FROM packages WHERE type = ? ORDER BY lower_name ASC`, string(t))
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*Package
+	for rows.Next() {
+		p := &Package{}
+		var typ string
+		if err := rows.Scan(&p.ID, &typ, &p.Name, &p.LowerName, &p.CreatedUnix); err != nil {
+			return nil, err
+		}
+		p.Type = Type(typ)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ----- Versions -----
+
+// CreateVersion inserts a new version. Returns ErrDuplicatePackageVersion
+// if (package_id, lower_version) already exists.
+func (s *Store) CreateVersion(ctx context.Context, packageID int64, version, metadataJSON string) (*Version, error) {
+	if metadataJSON == "" {
+		metadataJSON = "{}"
+	}
+	lower := strings.ToLower(version)
+	now := time.Now().Unix()
+	res, err := s.DB.ExecContext(ctx,
+		`INSERT INTO package_versions (package_id, version, lower_version, metadata_json, created_unix)
+		 VALUES (?, ?, ?, ?, ?)`,
+		packageID, version, lower, metadataJSON, now)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrDuplicatePackageVersion
+		}
+		return nil, fmt.Errorf("insert version: %w", err)
+	}
+	id, _ := res.LastInsertId()
+	return &Version{
+		ID:           id,
+		PackageID:    packageID,
+		Version:      version,
+		LowerVersion: lower,
+		MetadataJSON: metadataJSON,
+		CreatedUnix:  now,
+	}, nil
+}
+
+// GetVersion looks up a (package_id, version) pair.
+func (s *Store) GetVersion(ctx context.Context, packageID int64, version string) (*Version, error) {
+	row := s.DB.QueryRowContext(ctx,
+		`SELECT id, package_id, version, lower_version, metadata_json, created_unix
+		   FROM package_versions WHERE package_id = ? AND lower_version = ?`,
+		packageID, strings.ToLower(version))
+	v := &Version{}
+	if err := row.Scan(&v.ID, &v.PackageID, &v.Version, &v.LowerVersion, &v.MetadataJSON, &v.CreatedUnix); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrVersionNotExist
+		}
+		return nil, err
+	}
+	return v, nil
+}
+
+// ListVersions returns all versions of a package, sorted oldest-first by
+// creation time.
+func (s *Store) ListVersions(ctx context.Context, packageID int64) ([]*Version, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT id, package_id, version, lower_version, metadata_json, created_unix
+		   FROM package_versions WHERE package_id = ? ORDER BY created_unix ASC`,
+		packageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Version
+	for rows.Next() {
+		v := &Version{}
+		if err := rows.Scan(&v.ID, &v.PackageID, &v.Version, &v.LowerVersion, &v.MetadataJSON, &v.CreatedUnix); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// GetLatestVersion returns the most-recently-created version of a package.
+func (s *Store) GetLatestVersion(ctx context.Context, packageID int64) (*Version, error) {
+	row := s.DB.QueryRowContext(ctx,
+		`SELECT id, package_id, version, lower_version, metadata_json, created_unix
+		   FROM package_versions WHERE package_id = ?
+		   ORDER BY created_unix DESC LIMIT 1`,
+		packageID)
+	v := &Version{}
+	if err := row.Scan(&v.ID, &v.PackageID, &v.Version, &v.LowerVersion, &v.MetadataJSON, &v.CreatedUnix); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrVersionNotExist
+		}
+		return nil, err
+	}
+	return v, nil
+}
+
+// ----- Blobs -----
+
+// GetOrCreateBlob inserts a blob if one with the same SHA-256 doesn't exist.
+func (s *Store) GetOrCreateBlob(ctx context.Context, b Blob) (*Blob, error) {
+	if existing, err := s.GetBlobBySHA256(ctx, b.HashSHA256); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, ErrBlobNotExist) {
+		return nil, err
+	}
+
+	now := time.Now().Unix()
+	b.CreatedUnix = now
+	res, err := s.DB.ExecContext(ctx,
+		`INSERT INTO package_blobs (size, hash_md5, hash_sha1, hash_sha256, hash_sha512, created_unix)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(hash_sha256) DO NOTHING`,
+		b.Size, b.HashMD5, b.HashSHA1, b.HashSHA256, b.HashSHA512, now)
+	if err != nil {
+		return nil, fmt.Errorf("insert blob: %w", err)
+	}
+	if id, _ := res.LastInsertId(); id > 0 {
+		b.ID = id
+		return &b, nil
+	}
+	return s.GetBlobBySHA256(ctx, b.HashSHA256)
+}
+
+// GetBlobBySHA256 looks up a blob by SHA-256 hex digest.
+func (s *Store) GetBlobBySHA256(ctx context.Context, sha256Hex string) (*Blob, error) {
+	row := s.DB.QueryRowContext(ctx,
+		`SELECT id, size, hash_md5, hash_sha1, hash_sha256, hash_sha512, created_unix
+		   FROM package_blobs WHERE hash_sha256 = ?`, sha256Hex)
+	b := &Blob{}
+	if err := row.Scan(&b.ID, &b.Size, &b.HashMD5, &b.HashSHA1, &b.HashSHA256, &b.HashSHA512, &b.CreatedUnix); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrBlobNotExist
+		}
+		return nil, err
+	}
+	return b, nil
+}
+
+// ----- Files -----
+
+// CreateFile inserts a file referencing a blob.
+func (s *Store) CreateFile(ctx context.Context, f File) (*File, error) {
+	lower := strings.ToLower(f.Name)
+	now := time.Now().Unix()
+	isLead := 0
+	if f.IsLead {
+		isLead = 1
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`INSERT INTO package_files (version_id, blob_id, name, lower_name, is_lead, created_unix)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		f.VersionID, f.BlobID, f.Name, lower, isLead, now)
+	if err != nil {
+		return nil, fmt.Errorf("insert file: %w", err)
+	}
+	id, _ := res.LastInsertId()
+	f.ID = id
+	f.LowerName = lower
+	f.CreatedUnix = now
+	return &f, nil
+}
+
+// ListFilesByVersion returns all files attached to a version.
+func (s *Store) ListFilesByVersion(ctx context.Context, versionID int64) ([]*File, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT id, version_id, blob_id, name, lower_name, is_lead, created_unix
+		   FROM package_files WHERE version_id = ? ORDER BY name ASC`, versionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*File
+	for rows.Next() {
+		f := &File{}
+		var isLead int
+		if err := rows.Scan(&f.ID, &f.VersionID, &f.BlobID, &f.Name, &f.LowerName, &isLead, &f.CreatedUnix); err != nil {
+			return nil, err
+		}
+		f.IsLead = isLead != 0
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// ----- Properties -----
+
+// SetProperty inserts (or replaces) a property for (refType, refID, name).
+func (s *Store) SetProperty(ctx context.Context, refType PropertyRefType, refID int64, name, value string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM package_properties WHERE ref_type = ? AND ref_id = ? AND name = ?`,
+		int(refType), refID, name); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO package_properties (ref_type, ref_id, name, value) VALUES (?, ?, ?, ?)`,
+		int(refType), refID, name, value); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// GetProperty fetches a single property's value. Returns ("", false) if missing.
+func (s *Store) GetProperty(ctx context.Context, refType PropertyRefType, refID int64, name string) (string, bool, error) {
+	row := s.DB.QueryRowContext(ctx,
+		`SELECT value FROM package_properties WHERE ref_type = ? AND ref_id = ? AND name = ?`,
+		int(refType), refID, name)
+	var v string
+	if err := row.Scan(&v); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return v, true, nil
+}
+
+// isUniqueViolation returns true if err corresponds to a SQLite UNIQUE
+// constraint failure. modernc.org/sqlite encodes SQLite extended error codes
+// in the error message; we match on the substring to avoid pulling its
+// internal error type into our package.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") || strings.Contains(msg, "constraint failed: UNIQUE")
+}
