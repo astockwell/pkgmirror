@@ -1,17 +1,26 @@
 # pkgmirror
 
-A standalone, multi-format package mirror service. Inspired by (and learning from) the
-Gitea / Forgejo built-in package registry, but rewritten as a focused, lightweight
+A standalone, multi-format **package mirror with supply-chain controls
+built in**. Inspired by (and learning from) the Gitea / Forgejo
+built-in package registry, but rewritten as a focused, lightweight
 HTTP service with no dependency on the Forgejo codebase.
+
+pkgmirror's reason for existing is to be the **single chokepoint**
+between your developers / CI and the public package ecosystems. Every
+artifact that flows through it is cataloged, optionally inspected
+against policy, and recorded in an audit log — so when an upstream
+release gets compromised, a malicious typosquat lands in a registry,
+or a regulator asks "who pulled what, when, and under what license?",
+there's one place to answer from.
 
 ## Status
 
-Early scaffolding. Initial format implemented: **Go module proxy** (per
-[`GOPROXY` protocol](https://go.dev/ref/mod#goproxy-protocol)).
+Seven formats shipped, plus a working policy + audit engine. Active
+development; APIs surface-area-stable but no LTS guarantees yet.
 
-Roadmap (from `pkgmirror-spec.md`):
+### Package formats
 
-- [x] Go module proxy (`go`)
+- [x] Go module proxy (`go`) — `GOPROXY` v1 protocol
 - [x] PyPI (`pypi`) — wheel + sdist upload, PEP 503 simple index, PEP 691 JSON
 - [x] npm (`npm`) — publish, packument, tarball download, dist-tags, scoped packages
 - [x] RubyGems (`rubygems`) — `gem push` / `gem install`, compact index, legacy specs.4.8.gz, yank
@@ -20,6 +29,27 @@ Roadmap (from `pkgmirror-spec.md`):
 - [x] Alpine (`alpine`) — `apk add` / `apk update`, signed APKINDEX.tar.gz, per-tenant RSA key
 - [ ] Maven
 - [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, Swift, RPM, Debian, ALT, Arch, CRAN, Vagrant, Chef
+
+Every format goes through the same ingest / storage / serve pipeline, so
+the supply-chain controls below apply uniformly across all of them.
+
+### Supply-chain controls
+
+Full details + operator runbook in [docs/supply-chain.md](docs/supply-chain.md).
+
+| Control | What it does | Status |
+| --- | --- | --- |
+| **Cooldown** | Hide newly-published versions until they've been in the mirror for N days. Shrinks the blast radius of a compromised upstream release before anyone in your org installs it. | shipped |
+| **License allowlist** | Refuse, quarantine, or warn when an artifact's SPDX license isn't on your allowed list. (PyPI today; per-format extractors land alongside each format.) | shipped |
+| **Quarantine** | "Stored but hidden" status. Versions flagged by policy are kept on disk for forensics but disappear from index listings and 403 on read until an admin promotes or rejects them. | shipped |
+| **Audit log** | Every ingest, every non-Allow decision, and (per-tenant opt-in) every read recorded with actor, request ID, decision, and reason. Queryable via `/admin/audit`. | shipped |
+| **Multi-tenancy** | Each tenant is an isolation boundary for packages, tokens, and policy. Public / private visibility controls anonymous reads per tenant. | shipped |
+| **Token auth** | Per-user `pkm_*` tokens, stored as SHA-256 hashes; per-format compatibility shims so real client CLIs work unmodified (`go`, `pip`, `npm`, `gem`, `docker login`, `apk`, etc.). | shipped |
+| **Cascading policy rules** | Rules cascade by specificity (format / tenant / package / version-glob). Most-specific rule wins per evaluator; strictest decision wins across evaluators. Manageable via YAML or `/admin/rules` HTTP API. | shipped |
+| Per-version blocklist | Deny by exact `(name, version)`. | architecture supports it — implementation pending |
+| Sigstore / PEP 740 attestation verification | Cryptographic provenance gate. | planned |
+| OSV vulnerability gate | Block on known CVE at ingest or read. | planned |
+| Typosquat detection, velocity caps, post-install scanning | Heuristic and reactive controls. | planned |
 
 ## Quickstart
 
@@ -343,6 +373,15 @@ internal/config/      env-driven config
 internal/db/          SQLite open + migrations
 internal/models/      DB models + queries
 internal/storage/     content-addressed blob storage on the filesystem
+internal/auth/        token middleware + per-format compatibility shims
+internal/tenants/     multi-tenant isolation + visibility model
+internal/users/       user records + group membership
+internal/tokens/      pkm_* token issuance + verification
+internal/policy/      supply-chain policy engine
+  cooldown/           cooldown evaluator (min-age-in-mirror)
+  license/            license-allowlist evaluator (SPDX)
+internal/audit/       buffered audit logger + query API
+internal/admin/       /admin endpoints (rules, audit, quarantine)
 internal/packages/    format-agnostic service layer (create package + file)
   goproxy/            Go module proxy parser + HTTP handlers
   pypi/               PyPI parser + HTTP handlers
@@ -354,6 +393,21 @@ internal/packages/    format-agnostic service layer (create package + file)
 internal/server/      Gin router + middleware
 internal/ui/          Bootstrap-based HTML UI
 templates/            html/template files
+tests/blackbox/       per-format docker-driven conformance suites
+docs/                 operator + developer documentation
 ```
 
-See `DECISIONS.md` for the running log of architectural decisions and assumptions.
+## Documentation
+
+- [docs/supply-chain.md](docs/supply-chain.md) — policy engine operator runbook
+  (cooldown, license allowlist, quarantine workflow, audit queries)
+- [docs/auth.md](docs/auth.md) — token model, per-format credential mechanics,
+  tenant visibility, anonymous-read rules
+- [docs/storage.md](docs/storage.md) — content-addressed blob layout,
+  the staging-tmp story, key invariants for filesystem operators
+- [docs/blackbox-testing.md](docs/blackbox-testing.md) — the conformance
+  harness contract and how to add a new format's blackbox
+- [docs/adding-a-format.md](docs/adding-a-format.md) — the new-format playbook
+  with per-ecosystem recipes
+- [DECISIONS.md](DECISIONS.md) — running log of architectural decisions
+  and assumptions
