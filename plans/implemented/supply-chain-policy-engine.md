@@ -9,7 +9,7 @@ any future control) without changes.
 Companion docs:
 - [`docs/supply-chain.md`](../../docs/supply-chain.md) — operator-facing
   runbook for the shipped controls.
-- [`docs/supply-chain-security.md`](../../docs/supply-chain-security.md) —
+- [`../supply-chain-security-brainstorm.md`](../supply-chain-security-brainstorm.md) —
   the broader brainstorm of controls and the roadmap.
 
 This plan covers only what landed in the first pass.

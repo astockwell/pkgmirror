@@ -1,8 +1,13 @@
-# Supply Chain Security
+# Supply Chain Security — Brainstorm
 
 Supply chain security on a corporate mirror gives you a single chokepoint where you can layer defenses the public registries can't or won't enforce.
 
-This file is currently a brainstorm.
+This file is a **brainstorm / backlog**, not an approved plan. The first
+slice of these ideas already shipped as the
+[supply-chain policy engine](implemented/supply-chain-policy-engine.md)
+(cooldown + license allowlist + audit log + admin endpoints); the rest
+of this document is the longer roadmap it draws from. Promote any
+specific control to a real `plans/<name>.md` once it's ready to scope.
 
 ## Quick framing: upload-only vs. pull-through
 

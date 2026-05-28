@@ -7,7 +7,7 @@ audit trails live, and what to do when a version gets quarantined.
 For the architectural design see
 [`plans/implemented/supply-chain-policy-engine.md`](../plans/implemented/supply-chain-policy-engine.md).
 For the broader brainstorm of future controls see
-[`supply-chain-security.md`](supply-chain-security.md).
+[`plans/supply-chain-security-brainstorm.md`](../plans/supply-chain-security-brainstorm.md).
 
 ---
 
@@ -459,7 +459,7 @@ future admin endpoint):
 ## See also
 
 - [`auth.md`](auth.md) — the auth model the admin endpoints sit on top of.
-- [`supply-chain-security.md`](supply-chain-security.md) — the broader
+- [`../plans/supply-chain-security-brainstorm.md`](../plans/supply-chain-security-brainstorm.md) — the broader
   brainstorm of controls and the roadmap.
 - [`adding-a-format.md`](adding-a-format.md) — when adding a new format,
   remember to populate `Subject.Attrs["license"]` if the format carries

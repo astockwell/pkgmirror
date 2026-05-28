@@ -13,6 +13,16 @@ documentation of features that **already exist**.
 
 _(none right now — submit one as `plans/<name>.md`)_
 
+## Brainstorms / backlogs
+
+Loose notes that aren't yet a concrete plan but inform what to build
+next. Promote one to a real `plans/<name>.md` once it's ready to be
+scoped.
+
+| Doc | What it covers |
+| --- | --- |
+| [supply-chain-security-brainstorm.md](supply-chain-security-brainstorm.md) | Broader survey of supply-chain controls beyond the engine that already shipped — cooldowns, provenance, OSV, typosquat detection, tier promotion, etc. The shipped engine is the first slice of this list. |
+
 ## Implemented
 
 | Plan | Shipped | Post-facto notes |
