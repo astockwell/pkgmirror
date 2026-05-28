@@ -15,6 +15,7 @@ import (
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
 	"github.com/astockwell/pkgmirror/internal/packages/alpine"
 	"github.com/astockwell/pkgmirror/internal/packages/container"
+	"github.com/astockwell/pkgmirror/internal/packages/cran"
 	"github.com/astockwell/pkgmirror/internal/packages/debian"
 	"github.com/astockwell/pkgmirror/internal/packages/generic"
 	"github.com/astockwell/pkgmirror/internal/packages/goproxy"
@@ -96,6 +97,9 @@ func New(d Deps) (*gin.Engine, error) {
 
 	nugetGroup := r.Group("/api/packages/:tenant/nuget")
 	nuget.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(nugetGroup)
+
+	cranGroup := r.Group("/api/packages/:tenant/cran")
+	cran.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(cranGroup)
 
 	// Container (OCI) lives at the root /v2/... per the OCI distribution
 	// spec; clients don't tolerate a path prefix. Tenant is the first

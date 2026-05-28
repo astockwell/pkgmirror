@@ -5,6 +5,104 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-28 — CRAN format (twelfth format landed)
+
+**Decision:** Implement Forgejo's CRAN registry as the twelfth
+package format. Mounts at `/api/packages/:tenant/cran/` and
+exposes the directory shape `install.packages()` expects:
+
+- `/src/contrib/PACKAGES[.gz]` + `/src/contrib/<file>.tar.gz`
+- `/bin/<platform>/contrib/<rversion>/PACKAGES[.gz]` +
+  `/bin/<platform>/contrib/<rversion>/<file>`
+
+Uploads via `PUT /src` (source) and `PUT /bin?platform=&rversion=`
+(binary). Ported from
+`forgejo/routers/api/packages/cran/cran.go` and
+`forgejo/modules/packages/cran/metadata.go`.
+
+**On-demand PACKAGES index.** Same posture as the other formats.
+Latest version per package wins per (tenant, type, platform,
+rversion) tuple — ordering is by `created_unix DESC` rather than
+attempting a version-string sort, which would require implementing
+CRAN's version-comparison rules. The latest-upload-wins semantic
+matches what `tools::write_PACKAGES()` produces against an unsorted
+directory anyway. Older versions remain downloadable directly
+(R's `install.packages` can pin to a specific version via
+`pkgsearch` or by passing the exact tarball URL); the PACKAGES
+index just doesn't advertise them.
+
+**Composite-key file naming.** Same pattern Alpine + Debian + RPM
+use: a file's `name` column encodes
+`<cran.type>|<platform>|<rversion>|<basename>` so the
+`UNIQUE(version_id, name)` constraint holds across the source +
+multi-platform binary publishes of the same version. Source files
+get the `source||` (empty platform + rversion) prefix.
+
+**Property key parity with Forgejo, typo included.** The property
+key for R-version is named `cran.rvserion` in Forgejo (a typo for
+`cran.rversion`). We keep the misspelling so a future cross-tooling
+script that inspects either codebase's `package_properties` table
+sees the same key. Captured in the parser's `PropertyRVersion`
+constant comment.
+
+**Catch-all dispatch for `/src/contrib/*tail` and
+`/bin/.../*tail`.** Same gin "duplicate path conflict" workaround
+as NuGet. The literal `PACKAGES` / `PACKAGES.gz` segments would
+otherwise conflict with the `:filename` parameter at the same
+level. The `/Archive/<pkg>/<file>` shape (CRAN's historical
+versions directory) is handled as an alias for the contrib path
+since pkgmirror keeps every uploaded version anyway — there's no
+separate "archived" state.
+
+**Source-only blackbox scope.** R also supports binary packages
+(Windows .zip, macOS .tgz), but `install.packages(type="source")`
+is the universal fallback and works across all platforms. The
+blackbox drives source install only; the binary upload + download
+paths are covered by grey-box tests.
+
+**Multipart-or-raw upload body.** Same shape as the NuGet handler.
+R's standard tooling doesn't actually publish to CRAN-style URLs
+(CRAN itself accepts ftp uploads coordinated by maintainers); the
+likely uploaders are devtools-style scripts or curl, so we accept
+both raw `application/x-gzip` and multipart/form-data and pick
+out the first file part.
+
+**License extraction → policy engine.** CRAN's DESCRIPTION has a
+mandatory `License:` field, parsed by the DESCRIPTION reader and
+surfaced on `Metadata.License`. The handler hands it to
+`models.SetLicense` and the policy engine on every upload, matching
+the pattern in Maven / Alpine / PyPI / npm.
+
+**Black-box stack: r-base:4.4.3.** Docker Hub's `r-base` repo
+publishes patch-level tags (`4.4.3`, `4.4.2`, ...) but no
+`4.4`-style alias. We pin to the latest patch. The blackbox runs
+real `install.packages()` over plain HTTP with credentials in the
+URL — R's libcurl backend handles that form natively without any
+`.Renviron` plumbing — and asserts on the `* DONE (pkgname)`
+marker that R prints on successful `R CMD INSTALL`. Passes in ~13s
+once the image is pulled.
+
+**Trade-offs / what I'd revisit:**
+
+- Version-string sort vs created_unix sort for the latest-per-
+  package reduction. CRAN versions follow R's own ordering rules
+  (`compareVersion("1.2-3", "1.10-1")` returns -1); implementing
+  this properly would require ~50 LOC of CRAN-version parsing.
+  The created_unix ordering is fine in practice because operators
+  upload newer versions later.
+- The PACKAGES index doesn't include `Archive` historical
+  versions. CRAN proper publishes a separate `Archive/` directory
+  listing; we serve historical files via the alias route but
+  don't enumerate them. `install.packages(type="source",
+  available.packages())` only consults PACKAGES, so this is fine
+  for the common case.
+- Source-RPM-style detached signature for the index. R doesn't
+  verify the PACKAGES index cryptographically — only MD5sums of
+  the downloaded files, which we serve correctly. No need for the
+  Stable-Bytes pattern here.
+
+---
+
 ## 2026-05-28 — NuGet format (eleventh format landed)
 
 **Decision:** Implement Forgejo's NuGet registry as the eleventh

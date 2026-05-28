@@ -317,6 +317,45 @@ adaptation.
   method, but folded into our existing `extractToken` rather
   than implementing a separate `auth.Method`.
 
+#### CRAN
+
+- [`internal/packages/cran/parser.go`](internal/packages/cran/parser.go)
+  ← `modules/packages/cran/metadata.go` — direct transliteration
+  of the DESCRIPTION-file parser (RFC 822-ish with leading-
+  whitespace continuation), the .tar.gz / .zip dispatch by magic
+  bytes, the name + version regex validators, the Author field
+  cleanup (strip `[<role>] (<email>)` markers), and the field
+  enumeration in `setField`. The property keys (`cran.type`,
+  `cran.platform`, `cran.rvserion` — including the upstream
+  Forgejo typo in `rvserion`, kept for parity) are preserved.
+- [`internal/packages/cran/parser_test.go`](internal/packages/cran/parser_test.go)
+  ← `modules/packages/cran/metadata_test.go` — fixtures and test
+  names mirror upstream. Adapted to standard `testing` (Forgejo
+  uses testify/assert).
+- [`internal/packages/cran/index.go`](internal/packages/cran/index.go)
+  ← the PACKAGES emission loop in
+  `routers/api/packages/cran/cran.go` — Debian-control-style
+  paragraphs (Package / Version / Depends / Imports / LinkingTo /
+  Suggests / License / NeedsCompilation / MD5sum), one per
+  package, blank-line separated. The `MD5sum:` field comes from
+  the blob's stored hash so R's post-download integrity check
+  passes without re-reading the file.
+- [`internal/packages/cran/handler.go`](internal/packages/cran/handler.go)
+  ← `routers/api/packages/cran/cran.go` — the route shape
+  (`PUT /src`, `PUT /bin?platform=&rversion=`,
+  `GET /src/contrib/PACKAGES[.gz]`,
+  `GET /src/contrib/<file>`,
+  `GET /src/contrib/Archive/<pkg>/<file>`,
+  `GET /bin/:platform/contrib/:rversion/PACKAGES[.gz]`,
+  `GET /bin/:platform/contrib/:rversion/<file>`), the composite-
+  key file naming (`<type>|<platform>|<rversion>|<basename>` —
+  same pattern Alpine + Debian + RPM use), and the latest-per-
+  package reduction for the index are modeled on upstream. The
+  two `*tail` catch-alls work around gin's "duplicate path
+  conflict" between the literal `PACKAGES[.gz]` segments and the
+  `:filename` parameter at the same path level — Forgejo's
+  router doesn't have that constraint.
+
 ---
 
 ## OCI Distribution Spec

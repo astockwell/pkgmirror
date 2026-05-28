@@ -15,7 +15,7 @@ there's one place to answer from.
 
 ## Status
 
-Eleven formats shipped, plus a working policy + audit engine. Active
+Twelve formats shipped, plus a working policy + audit engine. Active
 development; APIs surface-area-stable but no LTS guarantees yet.
 
 ### Package formats
@@ -31,7 +31,8 @@ development; APIs surface-area-stable but no LTS guarantees yet.
 - [x] Debian (`debian`) — `apt update` / `apt-cache show`, on-demand Packages/Release indices, per-tenant OpenPGP signing (Release.gpg + InRelease)
 - [x] RPM (`rpm`) — `dnf install` / `dnf info`, on-demand primary/filelists/other + repomd.xml indices, per-tenant OpenPGP-signed `repomd.xml.asc`
 - [x] NuGet (`nuget`) — `dotnet add package` / `dotnet nuget push`, V3 service index + registration + package-base-address + search + publish, multipart + raw upload, `X-NuGet-ApiKey` auth
-- [ ] Cargo, Composer, Conan, Conda, Helm, Pub, Swift, ALT, Arch, CRAN, Vagrant, Chef
+- [x] CRAN (`cran`) — `install.packages()` for source + binary R packages, on-demand `PACKAGES` / `PACKAGES.gz` index per (platform, R version), DESCRIPTION parsing with license extraction
+- [ ] Cargo, Composer, Conan, Conda, Helm, Pub, Swift, ALT, Arch, Vagrant, Chef
 
 Every format goes through the same ingest / storage / serve pipeline, so
 the supply-chain controls below apply uniformly across all of them.
@@ -660,6 +661,74 @@ package id; we don't currently ship full-text ranking. Symbol
 packages (`.snupkg`) round-trip the upload path but the simple-
 symbol-query protocol for debugger lookup is not yet implemented.
 
+## Using the CRAN registry
+
+The CRAN endpoints follow the same directory shape R's
+`install.packages` expects: source packages under
+`/api/packages/:tenant/cran/src/contrib/`, binary packages under
+`/api/packages/:tenant/cran/bin/<platform>/contrib/<rversion>/`.
+
+Configure R to install from the registry:
+
+```r
+options(repos = c(pkgmirror =
+    "http://x:$PKGMIRROR_ADMIN_TOKEN@localhost:8080/api/packages/default/cran"))
+install.packages("MyPackage", type = "source")
+```
+
+R's libcurl backend reads `http://user:pass@host/...` credentials
+directly from the URL, so no `.Renviron` plumbing is required.
+
+Upload a source package (`.tar.gz` produced by `R CMD build`):
+
+```sh
+curl -fsS -X PUT \
+    -u x:$PKGMIRROR_ADMIN_TOKEN \
+    --data-binary @./MyPackage_1.0.0.tar.gz \
+    http://localhost:8080/api/packages/default/cran/src
+```
+
+Upload a binary package (Windows `.zip` or macOS `.tgz`) — the
+`platform` and `rversion` query params determine which
+`bin/<platform>/contrib/<rversion>/` subdirectory the file lands in:
+
+```sh
+curl -fsS -X PUT \
+    -u x:$PKGMIRROR_ADMIN_TOKEN \
+    --data-binary @./MyPackage_1.0.0.tar.gz \
+    "http://localhost:8080/api/packages/default/cran/bin?platform=x86_64-pc-linux-gnu&rversion=4.4"
+```
+
+Delete a published version:
+
+```sh
+curl -fsS -X DELETE \
+    -u x:$PKGMIRROR_ADMIN_TOKEN \
+    http://localhost:8080/api/packages/default/cran/mypackage/1.0.0
+```
+
+Endpoints exposed under each tenant:
+
+- `PUT  /src` — upload source `.tar.gz`
+- `GET  /src/contrib/PACKAGES[.gz]` — source index (plain or gzipped)
+- `GET  /src/contrib/<name>_<version>.tar.gz` — download source
+- `GET  /src/contrib/Archive/<name>/<filename>` — download historical source (alias)
+- `PUT  /bin?platform=<p>&rversion=<v>` — upload binary
+- `GET  /bin/:platform/contrib/:rversion/PACKAGES[.gz]` — binary index
+- `GET  /bin/:platform/contrib/:rversion/<filename>` — download binary
+- `DELETE /:name/:version` — hard-delete a version
+
+The `PACKAGES` index is built on demand from the live file list —
+one paragraph per package, newest-upload-wins per (name, platform,
+rversion) tuple. The `MD5sum:` field is filled from the blob's
+stored hash so R's post-download integrity check passes without
+re-reading the file.
+
+Authors / License / Imports / Depends / Suggests / LinkingTo /
+NeedsCompilation are parsed out of the package's DESCRIPTION at
+upload time. The License is surfaced to the policy engine and
+recorded on the version row.
+
 ## TLS
 
 pkgmirror can terminate TLS itself. Set both
@@ -722,6 +791,7 @@ internal/packages/    format-agnostic service layer (create package + file)
   debian/             .deb parser + on-demand Packages/Release builder + OpenPGP signing
   rpm/                .rpm header parser + on-demand repomd/primary/filelists/other + OpenPGP signing
   nuget/              .nupkg/.nuspec parser + V3 service index + registration + search + publish
+  cran/               R DESCRIPTION parser + on-demand PACKAGES/PACKAGES.gz index per platform+rversion
 internal/server/      Gin router + middleware
 internal/ui/          Bootstrap-based HTML UI
 templates/            html/template files

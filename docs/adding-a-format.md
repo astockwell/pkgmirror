@@ -1083,13 +1083,64 @@ EOF
 - **Spec:** [Swift Package Registry](https://github.com/apple/swift-package-manager/blob/main/Documentation/PackageRegistry/Registry.md)
 - **Black-box client:** `swift:5.10`.
 
-### CRAN (R)
+### CRAN (R) ✓ shipped
 
-- **Forgejo:** `forgejo/routers/api/packages/cran/cran.go`,
-  `forgejo/modules/packages/cran/metadata.go`
-- **Spec:** CRAN is conventional, not formally documented; Forgejo's
-  parser is the reference.
-- **Black-box client:** `r-base:4.4`.
+R / Bioconductor packages. See `internal/packages/cran/` for the
+reference implementation.
+
+- **Spec:** CRAN is conventional, not formally documented;
+  Forgejo's parser + `tools::write_PACKAGES()` are the references.
+- **Forgejo:**
+  - `forgejo/routers/api/packages/cran/cran.go` — handlers + the
+    PACKAGES index emission loop
+  - `forgejo/modules/packages/cran/metadata.go` — parses
+    `.tar.gz` / `.zip` archives, walks to find `DESCRIPTION`,
+    decodes the RFC 822-ish multi-line format
+- **Routes** (all under `/api/packages/:tenant/cran`):
+  - `PUT    /src` — upload source `.tar.gz`
+  - `GET    /src/contrib/PACKAGES[.gz]` — source index
+  - `GET    /src/contrib/<file>.tar.gz` — download source
+  - `GET    /src/contrib/Archive/<pkg>/<file>` — download historical source (alias)
+  - `PUT    /bin?platform=<p>&rversion=<v>` — upload binary
+  - `GET    /bin/:platform/contrib/:rversion/PACKAGES[.gz]` — binary index
+  - `GET    /bin/:platform/contrib/:rversion/<file>` — download binary
+  - `DELETE /:name/:version` — hard-delete a version
+  - `HEAD` on every `GET`
+- **Parser complexity:** moderate. The .tar.gz vs .zip dispatch by
+  magic bytes is straightforward; the DESCRIPTION reader is
+  RFC 822-ish with leading-whitespace continuation (Imports,
+  Depends, Description can span multiple lines). Forgejo's parser
+  ports cleanly.
+- **Patterns used:**
+  - On-demand PACKAGES index, latest-per-package by
+    `created_unix DESC` (we don't implement CRAN's
+    version-comparison rules).
+  - Composite-key file naming
+    (`<type>|<platform>|<rversion>|<basename>`) so source +
+    multi-platform binaries of the same version coexist under
+    `UNIQUE(version_id, name)`. Source files get the
+    `source||<basename>` shape (empty platform + rversion).
+  - Two catch-all gin routes (`/src/contrib/*tail` and
+    `/bin/:platform/contrib/:rversion/*tail`) work around gin's
+    duplicate-path-conflict on `PACKAGES[.gz]` vs `:filename`.
+  - License extraction from DESCRIPTION → `models.SetLicense` +
+    policy engine, same shape as Maven / Alpine / PyPI / npm.
+- **Black-box client:** `r-base:4.4.3` (Docker Hub publishes
+  patch-level tags, not a `4.4` alias). Commands:
+  ```sh
+  Rscript -e 'install.packages("foo",
+      repos="http://x:$TOKEN@pkgmirror:8080/api/packages/<tenant>/cran",
+      type="source", dependencies=FALSE)'
+  ```
+  R's libcurl backend reads `http://user:pass@host/...` credentials
+  directly from the URL, so no `.Renviron` plumbing is required.
+- **Client gotchas:**
+  - Docker Hub's `r-base` doesn't publish a `4.4` tag; pin to a
+    patch-level tag (e.g. `4.4.3`).
+  - Forgejo's property key for R version is misspelled
+    `cran.rvserion`. We preserve the typo for parity with the
+    upstream schema; future cross-tooling scripts that inspect
+    `package_properties` directly will see the same key.
 
 ### Conda
 
@@ -1139,7 +1190,7 @@ EOF
 | composer | moderate | `modules/packages/composer/` | `composer:2` |
 | cargo | moderate | `modules/packages/cargo/` | `rust:1.81-bookworm` |
 | nuget ✓ done | moderate | `modules/packages/nuget/` | `mcr.microsoft.com/dotnet/sdk:8.0` |
-| cran | moderate | `modules/packages/cran/` | `r-base:4.4` |
+| cran ✓ done | moderate | `modules/packages/cran/` | `r-base:4.4.3` |
 | conda | moderate | `modules/packages/conda/` | `continuumio/miniconda3` |
 | vagrant | moderate | `modules/packages/vagrant/` | `hashicorp/vagrant:latest` |
 | alpine ✓ done | moderate-high | `modules/packages/alpine/` | `alpine:3.20` |

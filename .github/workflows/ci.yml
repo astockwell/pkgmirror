@@ -60,6 +60,7 @@ jobs:
             debian:bookworm-slim
             fedora:41
             mcr.microsoft.com/dotnet/sdk:8.0
+            r-base:4.4.3
             curlimages/curl:8.10.1
           )
           for img in "${images[@]}"; do

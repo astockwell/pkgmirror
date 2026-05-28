@@ -26,6 +26,7 @@ const (
 	TypeDebian    Type = "debian"
 	TypeRPM       Type = "rpm"
 	TypeNuGet     Type = "nuget"
+	TypeCRAN      Type = "cran"
 )
 
 // PropertyRefType identifies the entity a property is attached to.
