@@ -54,6 +54,13 @@ adaptation.
   `<aa>/<bb>/<full-sha256>` content-addressed sharding scheme were
   ported so future drop-in S3/MinIO backends can match upstream
   expectations.
+- [`internal/syncutil/exclusive_pool.go`](internal/syncutil/exclusive_pool.go)
+  ← `modules/sync/exclusive_pool.go` — refcount-driven map-of-mutexes
+  used to serialize per-key writes (Maven's multi-file `mvn deploy`
+  today; future Debian / NuGet / RPM formats will use it too). The
+  refcount-and-delete behavior is the load-bearing property: memory
+  stays bounded by *concurrent* keys, not unique keys ever seen.
+  Originally from Gogs; preserved verbatim from forgejo.
 
 #### Go module proxy
 

@@ -5,6 +5,48 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-28 — Adopt Forgejo's ExclusivePool + add built-in TLS
+
+Two follow-ups from the Maven implementation review.
+
+**ExclusivePool replaces the naïve sync.Map of mutexes.** The original
+Maven handler used a `sync.Map[string]*sync.Mutex` to serialize
+per-package upload races. That works but leaks the mutex map entry
+forever — fine for a few hundred packages, ~80 bytes / coordinate of
+slow growth for a busy registry. Forgejo's `modules/sync.ExclusivePool`
+(originally from Gogs) refcounts per-key holders and deletes the map
+entry when the count hits zero, bounding memory by *concurrent*
+uploads rather than *unique coordinates ever seen*. Ported into
+`internal/syncutil` as a shared primitive — Maven uses it today,
+future Debian / NuGet / RPM formats with multi-file uploads will too.
+The implementation is ~40 lines + 4 tests covering the four invariants:
+serialization, parallel non-conflicting keys, post-checkout map
+cleanup, and the nested-count edge case.
+
+**Built-in TLS via `PKGMIRROR_TLS_CERT` + `PKGMIRROR_TLS_KEY`.** The
+canonical recommended deployment is "pkgmirror behind nginx/Caddy/
+Traefik" — those proxies handle ACME, cert renewal, OCSP stapling
+better than we ever would. But for single-binary deployments and
+dev environments where a reverse proxy is overkill, paying the
+proxy tax isn't reasonable. Added the two env vars; when both
+present, `cmd/pkgmirror/main.go` calls `ListenAndServeTLS` instead
+of `ListenAndServe`. Setting only one is a misconfiguration the
+process catches at boot. Hot cert reload is deferred — operators
+restart pkgmirror after rotating certs. ACME is out of scope (state
+management, challenge handlers, account keys; not a thing we should
+own).
+
+Specific consequence: the Maven blackbox test no longer needs the
+`maven-default-http-blocker` workaround if the test stack is ever
+upgraded to HTTPS. We're leaving the workaround in place for now
+because the blackbox uses internal-container HTTP and adding TLS
+between sibling containers is a separate plumbing exercise the
+harness doesn't need yet. The README documents the workaround as
+"only for plain-HTTP deployments; the principled fix is to terminate
+TLS."
+
+---
+
 ## 2026-05-28 — Maven format (eighth format landed)
 
 **Decision:** Implement Forgejo's Maven registry as the eighth

@@ -30,13 +30,13 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
 	"github.com/astockwell/pkgmirror/internal/policy"
+	"github.com/astockwell/pkgmirror/internal/syncutil"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 
 	"github.com/gin-gonic/gin"
@@ -69,12 +69,15 @@ type Handler struct {
 	Tenants *tenants.Store
 	Engine  policy.Engine
 
-	// uploadLocks serializes write traffic per
-	// (tenant, groupId:artifactId, version) so concurrent PUTs of
-	// jar + pom + sources.jar against the same coordinate don't
-	// race on version row creation. Mirrors forgejo's
-	// mavenUploadLock + key derivation.
-	uploadLocks sync.Map // key string -> *sync.Mutex
+	// uploads serializes write traffic per
+	// (tenant, groupId:artifactId) so concurrent PUTs of jar +
+	// pom + sources.jar against the same coordinate don't race on
+	// version row creation. Forgejo's ExclusivePool — refcount-
+	// driven map of mutexes — frees map entries when the last
+	// holder checks out, so memory stays bounded by *concurrent*
+	// uploads rather than *unique coordinates ever seen*. See
+	// internal/syncutil for details.
+	uploads *syncutil.ExclusivePool
 }
 
 // NewHandler constructs a Handler. If eng is nil the no-op engine is
@@ -83,7 +86,7 @@ func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store, eng pol
 	if eng == nil {
 		eng = policy.NoopEngine{}
 	}
-	return &Handler{Service: svc, Models: m, Tenants: ts, Engine: eng}
+	return &Handler{Service: svc, Models: m, Tenants: ts, Engine: eng, uploads: syncutil.NewExclusivePool()}
 }
 
 // Register mounts maven routes on g (expected to be scoped to
@@ -191,11 +194,6 @@ func buildPackageID(groupID, artifactID string) string {
 
 func isChecksumExtension(ext string) bool {
 	return ext == extensionMD5 || ext == extensionSHA1 || ext == extensionSHA256 || ext == extensionSHA512
-}
-
-func (h *Handler) lockFor(key string) *sync.Mutex {
-	mu, _ := h.uploadLocks.LoadOrStore(key, &sync.Mutex{})
-	return mu.(*sync.Mutex)
 }
 
 // --- routes ----------------------------------------------------------------
@@ -394,9 +392,9 @@ func (h *Handler) handleUpload(c *gin.Context) {
 
 	packageName := buildPackageID(params.GroupID, params.ArtifactID)
 
-	mu := h.lockFor(fmt.Sprintf("%d|%s", tenant.ID, packageName))
-	mu.Lock()
-	defer mu.Unlock()
+	lockKey := fmt.Sprintf("%d|%s", tenant.ID, packageName)
+	h.uploads.CheckIn(lockKey)
+	defer h.uploads.CheckOut(lockKey)
 
 	buf, err := h.Service.NewHashedBuffer(c.Request.Body)
 	if err != nil {

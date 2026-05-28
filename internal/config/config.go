@@ -40,6 +40,18 @@ type Config struct {
 	// and upserted into the policy_rules table. See
 	// plans/supply-chain-policy-engine.md §10 for the schema.
 	PolicyFile string
+
+	// TLSCertFile and TLSKeyFile, if both set, switch the listener
+	// from plain HTTP to HTTPS. Operators are responsible for cert
+	// material — pkgmirror does not ship ACME / Let's Encrypt
+	// integration. For automatic certs, run pkgmirror behind a
+	// reverse proxy (nginx, Caddy, Traefik) and leave these empty.
+	//
+	// Both must point at PEM-encoded files. A cert chain (leaf +
+	// intermediates concatenated) is the typical shape; the key
+	// file is the matching private key.
+	TLSCertFile string
+	TLSKeyFile  string
 }
 
 // Load reads configuration from environment variables, applying defaults.
@@ -60,7 +72,16 @@ func Load() Config {
 		DefaultTenantName:       envOr("PKGMIRROR_DEFAULT_TENANT", "default"),
 		DefaultTenantVisibility: vis,
 		PolicyFile:              os.Getenv("PKGMIRROR_POLICY_FILE"),
+		TLSCertFile:             os.Getenv("PKGMIRROR_TLS_CERT"),
+		TLSKeyFile:              os.Getenv("PKGMIRROR_TLS_KEY"),
 	}
+}
+
+// TLSEnabled reports whether both cert and key files are configured.
+// We treat partial config (only one set) as a misconfiguration the
+// caller should catch and report — see cmd/pkgmirror/main.go.
+func (c Config) TLSEnabled() bool {
+	return c.TLSCertFile != "" && c.TLSKeyFile != ""
 }
 
 func envOr(key, fallback string) string {

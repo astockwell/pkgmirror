@@ -149,11 +149,33 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	// Validate TLS config up front so a misconfiguration fails at
+	// boot rather than at first request.
+	if (cfg.TLSCertFile != "") != (cfg.TLSKeyFile != "") {
+		log.Fatalf("PKGMIRROR_TLS_CERT and PKGMIRROR_TLS_KEY must both be set or both empty")
+	}
+
 	go func() {
-		log.Printf("pkgmirror listening on %s (db=%s, blobs=%s, default-tenant=%s)",
-			cfg.Addr, cfg.DBPath, cfg.BlobDir, res.DefaultTenant.Name)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server error: %v", err)
+		scheme := "http"
+		if cfg.TLSEnabled() {
+			scheme = "https"
+		}
+		log.Printf("pkgmirror listening on %s://%s (db=%s, blobs=%s, default-tenant=%s)",
+			scheme, cfg.Addr, cfg.DBPath, cfg.BlobDir, res.DefaultTenant.Name)
+		var serveErr error
+		if cfg.TLSEnabled() {
+			// http.Server.ListenAndServeTLS reads the cert + key
+			// on every call (not once at boot), so a cert rotated
+			// in-place is picked up on the next graceful restart.
+			// For hot-reloads we'd need a getCertificate callback;
+			// not needed for the typical reverse-proxy or
+			// short-lived-pod deployment.
+			serveErr = httpSrv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+		} else {
+			serveErr = httpSrv.ListenAndServe()
+		}
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			log.Fatalf("server error: %v", serveErr)
 		}
 	}()
 

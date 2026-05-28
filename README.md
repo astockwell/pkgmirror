@@ -71,6 +71,8 @@ Environment variables:
 | `PKGMIRROR_DEFAULT_TENANT` | `default` | name of the tenant auto-created on first boot |
 | `PKGMIRROR_DEFAULT_TENANT_VISIBILITY` | `private` | `private` or `public` (controls anonymous reads) |
 | `PKGMIRROR_ADMIN_TOKEN` | _(generated)_ | install this as the admin token; if unset, one is minted and printed once on first boot |
+| `PKGMIRROR_TLS_CERT` | _(unset)_ | path to a PEM-encoded TLS cert chain (leaf + intermediates). Both this and `PKGMIRROR_TLS_KEY` must be set to switch the listener to HTTPS. |
+| `PKGMIRROR_TLS_KEY` | _(unset)_ | path to the matching PEM-encoded private key. |
 | `PKGMIRROR_LOG_LEVEL` | `info` | (reserved) |
 
 ## Using the Go module proxy
@@ -372,9 +374,10 @@ predictable URLs" (the Maven 2 repository layout). pkgmirror exposes
 the per-tenant repo at `/api/packages/:tenant/maven/` and follows the
 GAV path convention: `<groupId-with-slashes>/<artifactId>/<version>/<filename>`.
 
-Configure a `~/.m2/settings.xml` with credentials and a mirror entry
-that overrides Maven 3.8.1+'s default HTTP blocker if you're running
-without TLS termination in front of pkgmirror:
+Configure a `~/.m2/settings.xml` with credentials. If pkgmirror is
+serving HTTPS (either built-in TLS via `PKGMIRROR_TLS_CERT` /
+`PKGMIRROR_TLS_KEY` or behind a reverse proxy that terminates TLS),
+this is the only block you need:
 
 ```xml
 <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
@@ -385,7 +388,15 @@ without TLS termination in front of pkgmirror:
       <password>${env.PKGMIRROR_ADMIN_TOKEN}</password>
     </server>
   </servers>
-  <!-- Only needed for plain-HTTP deployments. -->
+</settings>
+```
+
+If you're running pkgmirror over plain HTTP (development, internal
+network), you also need to override Maven 3.8.1+'s built-in
+`maven-default-http-blocker` mirror, which routes every HTTP repo
+through `http://0.0.0.0/` to enforce HTTPS-by-default:
+
+```xml
   <mirrors>
     <mirror>
       <id>maven-default-http-blocker</id>
@@ -394,8 +405,9 @@ without TLS termination in front of pkgmirror:
       <blocked>false</blocked>
     </mirror>
   </mirrors>
-</settings>
 ```
+
+The principled fix is to terminate TLS — see [TLS](#tls) below.
 
 Publish a jar with `mvn deploy` or the lower-level `deploy-file` goal:
 
@@ -432,6 +444,38 @@ canonical license string is extracted from each artifact's POM and
 flows through the same supply-chain policy engine as every other
 format (cooldown, allowlist, quarantine).
 
+## TLS
+
+pkgmirror can terminate TLS itself. Set both
+`PKGMIRROR_TLS_CERT` and `PKGMIRROR_TLS_KEY` to PEM-encoded files and
+the listener switches from HTTP to HTTPS on the same `PKGMIRROR_ADDR`:
+
+```sh
+export PKGMIRROR_TLS_CERT=/etc/pkgmirror/tls/fullchain.pem
+export PKGMIRROR_TLS_KEY=/etc/pkgmirror/tls/privkey.pem
+export PKGMIRROR_ADDR=:8443
+pkgmirror
+# -> https://0.0.0.0:8443
+```
+
+`PKGMIRROR_TLS_CERT` is the full chain (leaf certificate concatenated
+with any intermediates) — the same shape Let's Encrypt's
+`fullchain.pem` and most managed cert services produce.
+`PKGMIRROR_TLS_KEY` is the matching private key.
+
+Setting only one of the two is a misconfiguration and the process
+fails fast at boot. Hot cert reload is not currently supported; for
+cert rotation, restart pkgmirror after the new files are in place
+(systemd / Kubernetes rolling restart works fine).
+
+pkgmirror does **not** ship ACME / Let's Encrypt integration. For
+automatic certs, run pkgmirror behind a reverse proxy (nginx, Caddy,
+Traefik) and leave `PKGMIRROR_TLS_*` empty — the proxy terminates TLS
+and pkgmirror serves plain HTTP on the loopback interface. This is the
+recommended deployment shape for production; built-in TLS is provided
+for single-binary deployments and dev environments where running a
+proxy is overkill.
+
 ## Project layout
 
 ```
@@ -449,6 +493,7 @@ internal/policy/      supply-chain policy engine
   license/            license-allowlist evaluator (SPDX)
 internal/audit/       buffered audit logger + query API
 internal/admin/       /admin endpoints (rules, audit, quarantine)
+internal/syncutil/    shared concurrency primitives (refcount-driven ExclusivePool)
 internal/packages/    format-agnostic service layer (create package + file)
   goproxy/            Go module proxy parser + HTTP handlers
   pypi/               PyPI parser + HTTP handlers
