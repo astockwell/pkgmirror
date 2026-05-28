@@ -1,3 +1,4 @@
+package pypi
 package pypi_test
 
 import (
