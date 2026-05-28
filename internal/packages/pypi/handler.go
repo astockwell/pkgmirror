@@ -203,7 +203,7 @@ func (h *Handler) upload(c *gin.Context) {
 		return
 	}
 
-	_, _, _, err = h.Service.CreatePackageOrAddFileToExisting(c.Request.Context(), pkgsvc.CreationInfo{
+	_, ver, _, err := h.Service.CreatePackageOrAddFileToExisting(c.Request.Context(), pkgsvc.CreationInfo{
 		TenantID:          tenant.ID,
 		PackageType:       models.TypePyPI,
 		PackageName:       rawName,
@@ -222,6 +222,14 @@ func (h *Handler) upload(c *gin.Context) {
 		c.String(http.StatusInternalServerError, "ingest: %v", err)
 		return
 	}
+
+	// Persist the SPDX license (if supplied) to the dedicated column so
+	// the license_allow evaluator can consult it on subsequent reads.
+	// Done after ingest so a write failure here doesn't lose the artifact.
+	if license := strings.TrimSpace(c.Request.FormValue("license")); license != "" && ver != nil {
+		_ = h.Models.SetLicense(c.Request.Context(), ver.ID, license)
+	}
+
 	c.Status(http.StatusCreated)
 }
 
@@ -497,8 +505,12 @@ func (h *Handler) subjectFor(tenant *tenants.Tenant, pkg *models.Package, ver *m
 			"created_unix":       ver.CreatedUnix,
 			"ingest_age_seconds": time.Now().Unix() - ver.CreatedUnix,
 		}
+		// Caller-supplied license (upload form) takes precedence;
+		// otherwise fall back to the value stored on the version row.
 		if license != "" {
 			s.Attrs["license"] = license
+		} else if ver.License.Valid && ver.License.String != "" {
+			s.Attrs["license"] = ver.License.String
 		}
 	}
 	return s

@@ -21,6 +21,7 @@ import (
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
 	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/policy/cooldown"
+	"github.com/astockwell/pkgmirror/internal/policy/license"
 	"github.com/astockwell/pkgmirror/internal/server"
 	"github.com/astockwell/pkgmirror/internal/storage"
 	"github.com/astockwell/pkgmirror/internal/tenants"
@@ -100,6 +101,7 @@ func main() {
 	}
 	core := policy.NewChainEngine( /* evaluators added in step 5+ */
 		cooldown.New(),
+		license.New(),
 	)
 	if err := core.PullFromStore(context.Background(), ruleStore); err != nil {
 		log.Fatalf("policy: initial rule pull: %v", err)
