@@ -213,3 +213,7 @@ each until one returns a non-nil `Identity`. No handler changes needed.
 - [DECISIONS.md](../DECISIONS.md) — running architecture decisions log.
 - [blackbox-testing.md](blackbox-testing.md) — how each format's
   conformance suite drives its real client.
+- [supply-chain.md](supply-chain.md) — supply-chain controls
+  (cooldown, license allowlist, audit, quarantine) layered on top
+  of this auth model. Admin endpoints there require `is_admin = 1`
+  on the user *and* the `admin` scope on the token.

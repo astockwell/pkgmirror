@@ -1,14 +1,105 @@
 # Plan: supply-chain policy engine
 
-**Status:** approved, not yet implemented
+**Status:** ✅ implemented (2026-05-27)
 **Scope of this plan:** the foundational policy engine + audit log + two
 concrete controls — **cooldown** and **license allowlist**. Per-version
 blocklist is deferred but the schema is designed to accommodate it (and
 any future control) without changes.
 
-Companion doc: [`docs/supply-chain-security.md`](../docs/supply-chain-security.md)
-(the broader brainstorm of controls). This plan covers only what we are
-implementing in the first pass.
+Companion docs:
+- [`docs/supply-chain.md`](../../docs/supply-chain.md) — operator-facing
+  runbook for the shipped controls.
+- [`docs/supply-chain-security.md`](../../docs/supply-chain-security.md) —
+  the broader brainstorm of controls and the roadmap.
+
+This plan covers only what landed in the first pass.
+
+---
+
+## Post-implementation notes (2026-05-27)
+
+The plan was implemented in **8 commits** matching the 8 steps in §11
+verbatim. Each step is independently `git revert`-able and leaves the
+tree in a working state. Final commit graph:
+
+```
+4eXXXXXX  policy: step 8 — docs + move plan to implemented/
+6cXXXXXX  policy: step 7 — admin endpoints for rules / audit / quarantine
+3eXXXXXX  policy: step 6 — license allowlist evaluator + PyPI license persistence
+84XXXXXX  policy: step 5 — cooldown evaluator
+a339a68   policy: step 4 — rule loader (DB + YAML) + ChainEngine + quarantine helpers
+1543e8c   policy: step 3 — audit package + auditing engine decorator
+7704ead   policy: step 2 — migration v3 (policy_rules + audit_log + columns)
+32efef3   policy: step 1 — types, NoopEngine, handler plumbing
+```
+
+### What landed exactly as written
+
+- The unifying abstraction (§2): `Subject`, `Action`, `Decision`,
+  `Engine` — unchanged from spec.
+- Schema (§3): `policy_rules`, `audit_log`, `tenants.audit_reads`,
+  `tenants.audit_retention_days`, `package_versions.license`,
+  `package_versions.quarantine_reason`,
+  `package_versions.quarantined_by_rule_id` — all exact.
+- Specificity model (§4): unchanged.
+- Quarantine semantics (stored-but-hidden), fail-mode (Deny on Ingest,
+  Allow on Read at the per-evaluator level), audit-from-day-1 — all
+  shipped as written.
+- Both evaluators (cooldown, license_allow) have the exact fold
+  semantics from §6.
+
+### Small deltas from the plan
+
+- **`PKGMIRROR_POLICY_FILE`** uses upsert-by-name and *never prunes*
+  rules absent from the file (per the plan), but doesn't yet support
+  `SIGHUP` reload — needs a restart. The 30s memory refresher does pick
+  up direct DB writes without restart, so YAML hotfix → `sqlite3 …
+  INSERT …` → engine sees it in ≤30s. A SIGHUP path is a small follow-up.
+- **Rule delete audit ordering**: the admin handler had to emit the
+  `rule_delete` audit event BEFORE deletion (rather than after as the
+  plan implied), because the audit write is async and would otherwise
+  race the `ON DELETE SET NULL` cascade and fail the FK. Functional
+  result is the same — the audit row exists with `rule_id` correctly
+  NULLed by the cascade.
+- **Cooldown "missing age" path**: returns Allow with a Reason rather
+  than Deny, which is the safer reading of "fail open on Read" applied
+  also to "fail open when the Subject doesn't carry the data we need".
+  This is consistent with the rest of the bad-config / panic-recovery
+  fallbacks.
+- **License extractor**: shipped for PyPI only. Other formats are
+  no-ops on the license column until their handlers learn to populate
+  it; the evaluator handles unknown-license via `on_unknown` so this
+  is intentional.
+
+### Tests
+
+- **5 evaluator unit tests** for the engine plumbing
+  (`internal/policy/policy_test.go`).
+- **9 ChainEngine + rule + YAML tests** (`internal/policy/engine_test.go`).
+- **7 cooldown unit + 2 integration tests** (the integration test
+  backdates `created_unix` mid-test to prove that cooldown expiry
+  un-hides the version without restart or rule change).
+- **9 license allowlist unit tests**.
+- **4 audit tests** (buffered logger, overflow drops, engine wrapper
+  filter, actor propagation).
+- **4 admin endpoint tests** (auth gate, rule CRUD, audit query,
+  quarantine lifecycle).
+- All **2 existing black-box conformance suites** (goproxy + pypi)
+  still pass unchanged.
+
+### Things I'd revisit later
+
+- A **`/admin/audit/drops`** endpoint exposing the buffered logger's
+  drop counter for monitoring. Right now you can only see drops via
+  process memory.
+- **`SIGHUP` reload** for the YAML rule file.
+- **Per-format license extractor interface** so the license_allow
+  evaluator works for Go (LICENSE-file parsing), npm (`package.json`),
+  and Maven (POM `<licenses>`) once those formats reach feature parity.
+- **Pull-through cache mode** — when added, the cooldown evaluator
+  should switch its time source from `created_unix` to
+  `upstream_published_unix` (additive column + per-rule
+  `time_source` config knob, both anticipated by the plan).
 
 ---
 
