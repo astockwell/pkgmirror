@@ -64,6 +64,7 @@ is repeated in the leaf filename so you can `find data/blobs -name
 | `PKGMIRROR_DATA_DIR` | `./data` | Root for everything pkgmirror persists. |
 | `PKGMIRROR_DB_PATH` | `$DATA_DIR/pkgmirror.db` | Override only the SQLite path. |
 | `PKGMIRROR_BLOB_DIR` | `$DATA_DIR/blobs` | Override only the blob root. Set this to a separately-mounted volume if you want the DB on fast local disk and blobs on bulk storage. |
+| `PKGMIRROR_TMP_DIR` | `$DATA_DIR/tmp` | Staging dir for in-flight upload buffers and OCI blob uploads. Defaults under `DATA_DIR` so it shares a filesystem with `BLOB_DIR` — the final move-to-blob is then a cheap rename rather than a cross-FS copy, and uploads never touch the system `/tmp` (which is often a small tmpfs). |
 
 ---
 

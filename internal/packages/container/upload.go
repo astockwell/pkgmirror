@@ -51,11 +51,17 @@ type upload struct {
 type UploadTracker struct {
 	mu      sync.Mutex
 	uploads map[string]*upload
+	// tmpDir is where Begin() creates staging files. Empty falls back
+	// to os.TempDir() (back-compat for tests that don't plumb a dir).
+	tmpDir string
 }
 
-// NewUploadTracker returns an empty tracker.
-func NewUploadTracker() *UploadTracker {
-	return &UploadTracker{uploads: map[string]*upload{}}
+// NewUploadTracker returns an empty tracker that stages files under
+// tmpDir. Pass "" to fall back to the system temp dir; production
+// callers should pass Service.TmpDir so staging lands on the same
+// filesystem as the blob store.
+func NewUploadTracker(tmpDir string) *UploadTracker {
+	return &UploadTracker{uploads: map[string]*upload{}, tmpDir: tmpDir}
 }
 
 // Begin opens a new upload session and returns its UUID. Callers append
@@ -65,7 +71,7 @@ func (t *UploadTracker) Begin() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	f, err := os.CreateTemp("", "pkgmirror-oci-upload-*")
+	f, err := os.CreateTemp(t.tmpDir, "pkgmirror-oci-upload-*")
 	if err != nil {
 		return "", fmt.Errorf("create upload temp: %w", err)
 	}

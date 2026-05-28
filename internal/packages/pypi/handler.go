@@ -161,7 +161,7 @@ func (h *Handler) upload(c *gin.Context) {
 	}
 	lookupName := NormalizeName(rawName)
 
-	buf, err := pkgsvc.NewHashedBufferFromReader(file)
+	buf, err := h.Service.NewHashedBuffer(file)
 	if err != nil {
 		c.String(http.StatusInternalServerError, "buffer upload: %v", err)
 		return

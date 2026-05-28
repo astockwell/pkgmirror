@@ -35,6 +35,9 @@ func main() {
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.Fatalf("create data dir: %v", err)
 	}
+	if err := os.MkdirAll(cfg.TmpDir, 0o755); err != nil {
+		log.Fatalf("create tmp dir: %v", err)
+	}
 
 	dbConn, err := pkgdb.Open(cfg.DBPath)
 	if err != nil {
@@ -73,6 +76,7 @@ func main() {
 		log.Fatalf("open blob storage: %v", err)
 	}
 	svc := pkgsvc.NewService(pkgModels, blobs)
+	svc.TmpDir = cfg.TmpDir
 
 	authn := &auth.TokenAuthenticator{
 		Tokens:  tokenStore,

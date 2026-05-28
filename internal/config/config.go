@@ -16,6 +16,14 @@ type Config struct {
 	DBPath  string
 	BlobDir string
 
+	// TmpDir is where short-lived staging files live (upload buffers,
+	// in-progress OCI blob uploads). Defaults to $DATA_DIR/tmp so it
+	// shares a filesystem with BlobDir — the final move-to-blob-store
+	// is then a cheap rename rather than a cross-FS copy. Set this
+	// explicitly if you want to put staging on a different volume
+	// (e.g. a fast local SSD while BlobDir points at a slower mount).
+	TmpDir string
+
 	// AdminToken, if set, is installed as the admin token at bootstrap (if
 	// no admin token already exists). Empty = generate one on first boot.
 	AdminToken string
@@ -47,6 +55,7 @@ func Load() Config {
 		DataDir:                 dataDir,
 		DBPath:                  envOr("PKGMIRROR_DB_PATH", filepath.Join(dataDir, "pkgmirror.db")),
 		BlobDir:                 envOr("PKGMIRROR_BLOB_DIR", filepath.Join(dataDir, "blobs")),
+		TmpDir:                  envOr("PKGMIRROR_TMP_DIR", filepath.Join(dataDir, "tmp")),
 		AdminToken:              os.Getenv("PKGMIRROR_ADMIN_TOKEN"),
 		DefaultTenantName:       envOr("PKGMIRROR_DEFAULT_TENANT", "default"),
 		DefaultTenantVisibility: vis,

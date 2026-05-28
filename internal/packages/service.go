@@ -42,9 +42,20 @@ type HashedBuffer struct {
 	sha512 hash.Hash
 }
 
-// NewHashedBufferFromReader drains r into a temp file, hashing as it goes.
+// NewHashedBufferFromReader drains r into a temp file in the system
+// temp dir, hashing as it goes. Prefer Service.NewHashedBuffer, which
+// uses the configured staging dir from the running pkgmirror instance.
+// This standalone constructor is retained for tests that don't have a
+// Service handy and as the back-compat surface for the previous API.
 func NewHashedBufferFromReader(r io.Reader) (*HashedBuffer, error) {
-	f, err := os.CreateTemp("", "pkgmirror-upload-*")
+	return NewHashedBufferInDir("", r)
+}
+
+// NewHashedBufferInDir is like NewHashedBufferFromReader but stages
+// the temp file under dir. An empty dir falls back to os.TempDir(),
+// which matches the back-compat behavior.
+func NewHashedBufferInDir(dir string, r io.Reader) (*HashedBuffer, error) {
+	f, err := os.CreateTemp(dir, "pkgmirror-upload-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp buffer: %w", err)
 	}
@@ -110,11 +121,25 @@ func (b *HashedBuffer) Close() error {
 type Service struct {
 	Models  *models.Store
 	Storage storage.ObjectStorage
+
+	// TmpDir is the staging directory for in-flight upload buffers and
+	// other short-lived files. Empty falls back to the system tmp dir
+	// (os.TempDir()); production deployments should set it to a
+	// directory on the same filesystem as the blob storage so the
+	// rename-to-blob is local. Plumbed in by cmd/pkgmirror at boot.
+	TmpDir string
 }
 
 // NewService constructs a Service.
 func NewService(m *models.Store, s storage.ObjectStorage) *Service {
 	return &Service{Models: m, Storage: s}
+}
+
+// NewHashedBuffer drains r into a temp file under s.TmpDir, hashing as
+// it goes. Format handlers should prefer this over the standalone
+// NewHashedBufferFromReader so the configured staging dir is honored.
+func (s *Service) NewHashedBuffer(r io.Reader) (*HashedBuffer, error) {
+	return NewHashedBufferInDir(s.TmpDir, r)
 }
 
 // CreationInfo carries everything needed to ingest a single uploaded file.

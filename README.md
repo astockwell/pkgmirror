@@ -36,6 +36,7 @@ Environment variables:
 | `PKGMIRROR_DATA_DIR` | `./data` | root dir for SQLite db + blob storage |
 | `PKGMIRROR_DB_PATH` | `$DATA_DIR/pkgmirror.db` | SQLite db file path |
 | `PKGMIRROR_BLOB_DIR` | `$DATA_DIR/blobs` | filesystem blob storage root |
+| `PKGMIRROR_TMP_DIR` | `$DATA_DIR/tmp` | staging dir for in-flight upload buffers + OCI blob uploads. Defaults under `DATA_DIR` so it shares a filesystem with `BLOB_DIR` and the move-to-blob is a cheap rename. Set explicitly to put staging on a different volume. |
 | `PKGMIRROR_DEFAULT_TENANT` | `default` | name of the tenant auto-created on first boot |
 | `PKGMIRROR_DEFAULT_TENANT_VISIBILITY` | `private` | `private` or `public` (controls anonymous reads) |
 | `PKGMIRROR_ADMIN_TOKEN` | _(generated)_ | install this as the admin token; if unset, one is minted and printed once on first boot |

@@ -168,7 +168,7 @@ func (h *Handler) publish(c *gin.Context) {
 	}
 
 	metaJSON, _ := json.Marshal(pkg.Metadata)
-	buf, err := pkgsvc.NewHashedBufferFromReader(bytes.NewReader(pkg.Data))
+	buf, err := h.Service.NewHashedBuffer(bytes.NewReader(pkg.Data))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, errorJSON("buffer: %v", err))
 		return

@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,7 +49,12 @@ func newPyPIFixtureWithCooldown(t *testing.T, minAgeDays int) (
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_ = db.Close()
+		// Explicit RemoveAll before t.TempDir's auto-cleanup to dodge
+		// a macOS APFS race on fixtures that close fast.
+		_ = os.RemoveAll(dir)
+	})
 
 	pkgModels = models.New(db)
 	tenStore := tenants.New(db)

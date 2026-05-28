@@ -545,7 +545,7 @@ func (h *Handler) uploadPackageFile(c *gin.Context) {
 	if !auth.RequireWrite(c, tenant) {
 		return
 	}
-	buf, err := pkgsvc.NewHashedBufferFromReader(c.Request.Body)
+	buf, err := h.Service.NewHashedBuffer(c.Request.Body)
 	if err != nil {
 		c.String(http.StatusInternalServerError, "buffer: %v", err)
 		return

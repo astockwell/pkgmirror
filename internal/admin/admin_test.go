@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/astockwell/pkgmirror/assets"
 	"github.com/astockwell/pkgmirror/internal/audit"
@@ -46,7 +48,12 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_ = db.Close()
+		// Explicit RemoveAll before t.TempDir's auto-cleanup to dodge
+		// a macOS APFS race on fixtures that close fast.
+		_ = os.RemoveAll(dir)
+	})
 
 	pkgModels := models.New(db)
 	tenStore := tenants.New(db)
@@ -209,18 +216,30 @@ func TestAdmin_AuditQuery(t *testing.T) {
 		_, _ = f.do(t, http.MethodPost, "/admin/rules", body, f.adminToken)
 	}
 
-	resp, out := f.do(t, http.MethodGet, "/admin/audit?action=rule_upsert", nil, f.adminToken)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d body=%s", resp.StatusCode, out)
-	}
-	var got struct {
-		Events []audit.Event
-	}
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(got.Events) < 3 {
-		t.Fatalf("expected >=3 rule_upsert events, got %d: %+v", len(got.Events), got.Events)
+	// The audit logger is asynchronous (buffered + drained by a
+	// goroutine), so the rows aren't guaranteed to be visible the
+	// instant the POST returns. Poll briefly until we see at least
+	// the expected count or hit the timeout. 2 s is generous; the
+	// drainer typically flushes within a few ms.
+	deadline := time.Now().Add(2 * time.Second)
+	var got struct{ Events []audit.Event }
+	for {
+		resp, out := f.do(t, http.MethodGet, "/admin/audit?action=rule_upsert", nil, f.adminToken)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d body=%s", resp.StatusCode, out)
+		}
+		got.Events = nil
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(got.Events) >= 3 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after %s: expected >=3 rule_upsert events, got %d: %+v",
+				time.Since(deadline.Add(-2*time.Second)), len(got.Events), got.Events)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

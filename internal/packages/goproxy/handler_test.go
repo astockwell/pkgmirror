@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -75,7 +76,12 @@ func newTestFixture(t *testing.T) *testFixture {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_ = db.Close()
+		// Explicit RemoveAll before t.TempDir's auto-cleanup to dodge
+		// a macOS APFS race on fixtures that close fast.
+		_ = os.RemoveAll(dir)
+	})
 
 	pkgModels := models.New(db)
 	tenantStore := tenants.New(db)
@@ -286,7 +292,12 @@ func TestPublicTenantAllowsAnonRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_ = db.Close()
+		// Explicit RemoveAll before t.TempDir's auto-cleanup to dodge
+		// a macOS APFS race on fixtures that close fast.
+		_ = os.RemoveAll(dir)
+	})
 
 	pkgModels := models.New(db)
 	tenantStore := tenants.New(db)

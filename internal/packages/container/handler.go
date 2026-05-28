@@ -67,7 +67,7 @@ func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store, eng pol
 	}
 	return &Handler{
 		Service: svc, Models: m, Tenants: ts, Engine: eng,
-		Uploads: NewUploadTracker(),
+		Uploads: NewUploadTracker(svc.TmpDir),
 	}
 }
 
@@ -879,7 +879,7 @@ func (h *Handler) storeBytes(c *gin.Context, b []byte) (*models.Blob, error) {
 // call merely (re)writes the same content-addressed blob, which is
 // idempotent thanks to GetOrCreateBlob.
 func (h *Handler) dummyBuf(b []byte) *pkgsvc.HashedBuffer {
-	buf, _ := pkgsvc.NewHashedBufferFromReader(bytes.NewReader(b))
+	buf, _ := h.Service.NewHashedBuffer(bytes.NewReader(b))
 	return buf
 }
 
