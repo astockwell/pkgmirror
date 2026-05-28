@@ -148,6 +148,76 @@ SELECT id, tenant_id, type, name, lower_name, created_unix FROM packages;
 DROP TABLE packages;
 ALTER TABLE packages_new RENAME TO packages;
 `,
+	// v2 -> v3: supply-chain policy engine foundation.
+	// Adds policy_rules, audit_log, and the columns used by quarantine
+	// + license + per-tenant audit configuration. See
+	// plans/supply-chain-policy-engine.md §3 for the design.
+	`
+CREATE TABLE IF NOT EXISTS policy_rules (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT    NOT NULL,
+    kind         TEXT    NOT NULL,
+
+    -- Selector. NULL/empty = "any" for that dimension.
+    tenant_id          INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+    format             TEXT,
+    package_lower_name TEXT,
+    version_pattern    TEXT,
+
+    -- Decision payload.
+    action       TEXT    NOT NULL,
+    config_json  TEXT    NOT NULL DEFAULT '{}',
+    priority     INTEGER NOT NULL DEFAULT 100,
+
+    enabled            INTEGER NOT NULL DEFAULT 1,
+    created_unix       INTEGER NOT NULL,
+    created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    expires_unix       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_rules_lookup
+    ON policy_rules(enabled, kind, tenant_id, format);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_unix    INTEGER NOT NULL,
+
+    actor_user_id   INTEGER REFERENCES users(id)  ON DELETE SET NULL,
+    actor_token_id  INTEGER REFERENCES tokens(id) ON DELETE SET NULL,
+    request_id      TEXT,
+    remote_addr     TEXT,
+    user_agent      TEXT,
+
+    tenant_id       INTEGER REFERENCES tenants(id) ON DELETE SET NULL,
+    action          TEXT    NOT NULL,
+    format          TEXT,
+    package         TEXT,
+    version         TEXT,
+    filename        TEXT,
+
+    decision        TEXT,
+    rule_id         INTEGER REFERENCES policy_rules(id) ON DELETE SET NULL,
+    reason          TEXT,
+
+    extra_json      TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_tenant_time
+    ON audit_log(tenant_id, created_unix DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_pkg
+    ON audit_log(format, package, version);
+CREATE INDEX IF NOT EXISTS idx_audit_actor
+    ON audit_log(actor_user_id, created_unix DESC);
+
+-- Per-tenant audit configuration.
+ALTER TABLE tenants ADD COLUMN audit_reads          INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tenants ADD COLUMN audit_retention_days INTEGER NOT NULL DEFAULT 90;
+
+-- Quarantine + license columns on package_versions.
+ALTER TABLE package_versions ADD COLUMN license                TEXT;
+ALTER TABLE package_versions ADD COLUMN quarantine_reason      TEXT;
+ALTER TABLE package_versions ADD COLUMN quarantined_by_rule_id INTEGER REFERENCES policy_rules(id) ON DELETE SET NULL;
+`,
 }
 
 // Open opens (and creates if missing) the SQLite database at path and brings
