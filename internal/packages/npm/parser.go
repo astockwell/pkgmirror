@@ -1,4 +1,3 @@
-package npm
 // Copyright 2026 Alex Stockwell and pkgmirror contributors.
 // Portions Copyright 2021 The Gitea Authors.
 // SPDX-License-Identifier: MIT

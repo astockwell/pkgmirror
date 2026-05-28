@@ -15,9 +15,10 @@ import (
 type Type string
 
 const (
-	TypeGo   Type = "go"
-	TypePyPI Type = "pypi"
-	TypeNpm  Type = "npm"
+	TypeGo       Type = "go"
+	TypePyPI     Type = "pypi"
+	TypeNpm      Type = "npm"
+	TypeRubyGems Type = "rubygems"
 )
 
 // PropertyRefType identifies the entity a property is attached to.

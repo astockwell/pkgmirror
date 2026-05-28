@@ -5,6 +5,86 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-27 — RubyGems format (fourth format landed)
+
+**Decision:** Implement RubyGems as the fourth package format, mounted at
+`/api/packages/:tenant/rubygems`. Both the modern compact index and the
+legacy Marshal-encoded specs are served so we work with every gem CLI
+from 2.x through current.
+
+Routes (verbatim port of Forgejo's shape):
+
+- `GET    /specs.4.8.gz` — Ruby Marshal-encoded specs index (every version)
+- `GET    /latest_specs.4.8.gz` — newest version per package
+- `GET    /prerelease_specs.4.8.gz` — empty (we don't model prerelease)
+- `GET    /info/:package` — compact index info file
+- `GET    /versions` — compact index versions file (with per-package md5)
+- `GET    /quick/Marshal.4.8/:filename` — zlib-Marshal `Gem::Specification`
+- `GET    /gems/:filename` — `.gem` tarball download
+- `POST   /api/v1/gems` — upload (auth)
+- `DELETE /api/v1/gems/yank` — yank a version (auth)
+
+Parser + Marshal encoder ported from
+`forgejo/modules/packages/rubygems/{metadata,marshal}.go` (MIT). SPDX +
+attribution headers preserved on the derived files; differences are
+limited to error-sentinel shape (we use plain `errors.New` since our
+HTTP layer doesn't depend on Forgejo's `util.NewInvalidArgumentErrorf`).
+
+**Ruby Marshal v4.8 encoder:** Implemented just enough types
+(`nil`, bool, Fixnum, String, Symbol with link table, Array,
+UserMarshal, UserDef, Object) to satisfy the registry endpoints. No
+decoder — every endpoint we serve writes Marshal data, never reads it.
+The encoder is upstream-byte-exact and exercised by the unit test
+`TestMarshalEncoder` which uses the golden vectors from Forgejo's own
+test suite. If the encoder is ever out of spec with Ruby Marshal those
+tests fail immediately.
+
+**Yank as policy quarantine:** `gem yank` semantics are "make this
+version uninstallable but leave the archived `.gem` for forensic
+reachability". That maps cleanly onto our existing
+`models.QuarantineVersion` machinery with a stable `reason = "yanked"`,
+which means yanks flow into the audit log and the `/admin/quarantine`
+view for free — no new table, no parallel "is_yanked" column. To
+un-yank, an operator promotes the version through the same admin
+endpoint they'd use for any other quarantine.
+
+**Filename lookup is O(N\*M):** Downloads come in as
+`/gems/foo-1.0.0.gem` (or `/gems/foo-1.0.0-x86_64-linux.gem` for
+non-`ruby` platforms). Rather than parse the filename — the platform
+substring can itself contain hyphens — we list all RubyGems packages
+in the tenant, list their versions, and recompute the canonical
+filename until we hit a match. For tenant sizes a single mirror sees
+this is fine; if it ever becomes a bottleneck we add a
+`(tenant_id, lower_filename) → version_id` lookup table.
+
+**Auth: bare-token Authorization header:** `gem push` sends the raw
+token as the `Authorization` header value with no `Bearer ` scheme
+prefix. We extend `auth.extractToken` to recognize headers that start
+with our token prefix (`pkm_`) and treat the whole value as the token.
+Safe because the prefix is unambiguous; same fallback also enables
+naive cargo / chef / a few other clients that don't bother with
+scheme prefixes either. Existing `Bearer` and `Basic` handling is
+unchanged.
+
+**`latest_specs` picks newest-by-upload, not highest-semver:** We don't
+parse gem versions for comparison. The newest upload wins. Both `gem`
+and Bundler re-validate against the compact index `/info/<gem>` before
+resolving anyway, so the legacy specs response is purely advisory.
+Documented explicitly in the handler so a future reader doesn't think
+it's a bug.
+
+**What I'd revisit:**
+- A proper Ruby version comparator so `latest_specs` matches what
+  upstream rubygems.org returns (highest semver).
+- Format-aware lookup index for the filename→version path described
+  above, once we have a workload that warrants it.
+- The `/quick/Marshal.4.8` gemspec skeleton hard-codes
+  `@rubygems_version = "3.2.3"` and `@specification_version = 4`. Real
+  gems carry their own values; we should pull them from the parsed
+  gemspec rather than the constants we ported from Forgejo.
+
+---
+
 ## 2026-05-27 — npm format (third format landed)
 
 **Decision:** Implement npm as the third package format, mounted at

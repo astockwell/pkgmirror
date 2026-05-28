@@ -155,6 +155,13 @@ func extractToken(r *http.Request) string {
 			return ""
 		}
 		return string(decoded[idx+1:])
+	case strings.HasPrefix(h, tokens.Prefix):
+		// Some clients (notably `gem push` and cargo's "Token <value>"
+		// variants without the scheme prefix) send the raw token as the
+		// Authorization header value. Our tokens carry a recognizable
+		// pkm_ prefix so this case is unambiguous — anything that
+		// doesn't start with the prefix is rejected.
+		return strings.TrimSpace(h)
 	}
 	return ""
 }

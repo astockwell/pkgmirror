@@ -16,6 +16,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/packages/goproxy"
 	"github.com/astockwell/pkgmirror/internal/packages/npm"
 	"github.com/astockwell/pkgmirror/internal/packages/pypi"
+	"github.com/astockwell/pkgmirror/internal/packages/rubygems"
 	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/ui"
@@ -67,6 +68,9 @@ func New(d Deps) (*gin.Engine, error) {
 
 	npmGroup := r.Group("/api/packages/:tenant/npm")
 	npm.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(npmGroup)
+
+	rubygemsGroup := r.Group("/api/packages/:tenant/rubygems")
+	rubygems.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(rubygemsGroup)
 
 	if d.Rules != nil {
 		(&admin.Handler{

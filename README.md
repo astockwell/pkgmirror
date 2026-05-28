@@ -14,10 +14,11 @@ Roadmap (from `pkgmirror-spec.md`):
 - [x] Go module proxy (`go`)
 - [x] PyPI (`pypi`) — wheel + sdist upload, PEP 503 simple index, PEP 691 JSON
 - [x] npm (`npm`) — publish, packument, tarball download, dist-tags, scoped packages
+- [x] RubyGems (`rubygems`) — `gem push` / `gem install`, compact index, legacy specs.4.8.gz, yank
 - [ ] Generic
 - [ ] Maven
 - [ ] Container (OCI)
-- [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, RubyGems, Swift, RPM, Debian, Alpine, ALT, Arch, CRAN, Vagrant, Chef
+- [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, Swift, RPM, Debian, Alpine, ALT, Arch, CRAN, Vagrant, Chef
 
 ## Quickstart
 
@@ -144,6 +145,57 @@ Unlike `go`, `npm` is happy with token auth over plain HTTP via
 auth gate is identical to the other formats — see
 [`docs/auth.md`](docs/auth.md).
 
+## Using the RubyGems registry
+
+Drop a credentials file at `~/.gem/credentials` (the `gem` CLI requires
+mode `0600`):
+
+```sh
+mkdir -p ~/.gem && chmod 700 ~/.gem
+cat > ~/.gem/credentials <<EOF
+---
+:rubygems_api_key: $PKGMIRROR_ADMIN_TOKEN
+http://localhost:8080/api/packages/default/rubygems: $PKGMIRROR_ADMIN_TOKEN
+EOF
+chmod 600 ~/.gem/credentials
+```
+
+Publish a gem with the standard `gem push` command. `--host` must exactly
+match the key in `credentials`:
+
+```sh
+gem build mygem.gemspec
+gem push --host http://localhost:8080/api/packages/default/rubygems mygem-1.0.0.gem
+```
+
+Install a gem by pointing `--source` at the mirror:
+
+```sh
+gem install mygem --source http://localhost:8080/api/packages/default/rubygems/
+```
+
+Bundler config:
+
+```sh
+bundle config http://localhost:8080/api/packages/default/rubygems/ \
+    pkgmirror:$PKGMIRROR_ADMIN_TOKEN
+```
+
+Yank a published version with the upstream API:
+
+```sh
+gem yank mygem -v 1.0.0 \
+    --host http://localhost:8080/api/packages/default/rubygems
+```
+
+The mirror serves both the modern compact index
+(`/info/<gem>`, `/versions`) used by Bundler 2.x and `gem install`, and
+the legacy Marshal-encoded `/specs.4.8.gz` / `/quick/Marshal.4.8/*.gemspec.rz`
+used by older clients. `gem push` sends the raw token as the
+`Authorization` header value with no scheme prefix; the auth middleware
+accepts that form alongside `Bearer` and `Basic` because pkgmirror tokens
+carry an unambiguous `pkm_` prefix.
+
 ## Project layout
 
 ```
@@ -156,6 +208,7 @@ internal/packages/    format-agnostic service layer (create package + file)
   goproxy/            Go module proxy parser + HTTP handlers
   pypi/               PyPI parser + HTTP handlers
   npm/                npm parser + HTTP handlers
+  rubygems/           RubyGems parser + Ruby Marshal encoder + HTTP handlers
 internal/server/      Gin router + middleware
 internal/ui/          Bootstrap-based HTML UI
 templates/            html/template files
