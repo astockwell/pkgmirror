@@ -966,25 +966,70 @@ reference implementation.
   apk add foo
   ```
 
-### RPM (`yum` / `dnf`)
+### RPM (`yum` / `dnf`) ✓ shipped
 
-RHEL / Fedora / Rocky / Alma packages.
+RHEL / Fedora / Rocky / Alma packages. See `internal/packages/rpm/`
+for the reference implementation.
 
-- **Forgejo:** `forgejo/routers/api/packages/rpm/rpm.go`,
-  `forgejo/modules/packages/rpm/metadata.go`
+- **Spec:** [createrepo metadata format](https://createrepo.baseurl.org/)
+  + `repomd.xml` schema (the de-facto standard; not formally an RFC)
+- **Forgejo:**
+  - `forgejo/routers/api/packages/rpm/rpm.go` — handlers
+  - `forgejo/modules/packages/rpm/metadata.go` — parses the binary
+    RPM header (wraps `github.com/sassoftware/go-rpmutils`)
+  - `forgejo/services/packages/rpm/repository.go` — repomd / primary
+    / filelists / other XML builders + OpenPGP detached signature
+- **Routes:**
+  - `GET    /:group/repository.key`
+  - `GET    /:group/repository.repo` (auto-detects http/https)
+  - `GET    /:group/repodata/:filename` (repomd.xml,
+    repomd.xml.asc, primary.xml.gz, filelists.xml.gz, other.xml.gz)
+  - `GET    /:group/package/:name/:version/:architecture/:filename`
+  - `PUT    /:group/upload`
+  - `DELETE /:group/package/:name/:version/:architecture`
+  - `HEAD` on every `GET` (dnf uses it for cache validation)
 - **Parser complexity:** moderate to high. RPM has a complex binary
-  metadata block (RPM tags table).
-- **Patterns expected:** catch-all path (the `<dist>/<arch>/repodata/`
-  layout), `ExclusivePool` for multi-file uploads (`.rpm` + debuginfo
-  sibling), on-demand `repomd.xml` / `primary.xml.gz` /
-  `filelists.xml.gz` generation (this index is several files referencing
-  each other by SHA256, similar to APKINDEX), per-tenant GPG key for
-  `repomd.xml.asc`. See [Cross-cutting patterns](#cross-cutting-patterns).
-- **Black-box client:** `fedora:41` or `rockylinux:9`. Commands:
+  metadata block (RPM tags table); we delegate to `go-rpmutils`.
+- **Patterns used:** on-demand repomd / primary / filelists / other
+  generation, per-tenant OpenPGP keypair on a synthetic `_rpm`
+  package row, `ExclusivePool` around first-time key generation,
+  composite-key-in-file-name (`<group>|<arch>|<basename>`), HEAD
+  support. The `<timestamp>` in `repomd.xml` is derived from
+  `max(file.created_unix)` so GET `/repodata/repomd.xml` and GET
+  `/repodata/repomd.xml.asc` see byte-identical repomd bytes — see
+  [Stable bytes for signed-on-demand content](#stable-bytes-for-signed-on-demand-content).
+- **Black-box client:** `fedora:41`. Commands:
   ```sh
-  dnf config-manager --add-repo http://pkgmirror:8080/api/packages/<tenant>/rpm/<dist>/<arch>.repo
-  dnf install -y foo
+  curl -fsS -u x:$TOKEN \
+      -o /etc/pki/rpm-gpg/RPM-GPG-KEY-pkgmirror \
+      http://pkgmirror:8080/api/packages/<tenant>/rpm/<group>/repository.key
+  rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-pkgmirror
+  cat > /etc/yum.repos.d/pkgmirror.repo <<EOF
+[pkgmirror-test]
+name=pkgmirror test
+baseurl=http://x:$TOKEN@pkgmirror:8080/api/packages/<tenant>/rpm/<group>
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-pkgmirror
+EOF
+  # Disable fedora's default repos so makecache doesn't try the internet
+  rm -f /etc/yum.repos.d/fedora*.repo
+  dnf -y --repo=pkgmirror-test makecache
+  dnf -y --repo=pkgmirror-test install foo
   ```
+- **Client gotchas:**
+  - dnf 5 (the default in fedora:41) is fussier with external
+    credential helpers than dnf 4 was; the simplest portable form is
+    an authed `baseurl=http://x:$TOKEN@...` written directly into the
+    `.repo` file.
+  - fedora:41's stock repos try `mirrors.fedoraproject.org` even
+    when `--repo=pkgmirror-test` is the only enabled repo on the
+    command line; remove them from `/etc/yum.repos.d/` to keep
+    `makecache` from failing on network-unavailable mirrors.
+  - Only single-segment `:group` values are supported in the MVP
+    (`el9`, not `el9/extras`). Multi-segment groups would require a
+    wildcard route + a tweak to `storedFileName`.
 
 ### Pub (Dart / Flutter)
 
@@ -1061,7 +1106,7 @@ RHEL / Fedora / Rocky / Alma packages.
 | vagrant | moderate | `modules/packages/vagrant/` | `hashicorp/vagrant:latest` |
 | alpine ✓ done | moderate-high | `modules/packages/alpine/` | `alpine:3.20` |
 | debian ✓ done | moderate-high | `modules/packages/debian/` | `debian:bookworm-slim` |
-| rpm | high | `modules/packages/rpm/` | `fedora:41` |
+| rpm ✓ done | high | `modules/packages/rpm/` | `fedora:41` |
 | arch | moderate-high | `modules/packages/arch/` | `archlinux:base` |
 | alt | high | _(handler only)_ | (limited image availability) |
 | rubygems ✓ done | high (Marshal) | `modules/packages/rubygems/` | `ruby:3.3-slim` |

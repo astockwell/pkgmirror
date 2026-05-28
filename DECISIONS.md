@@ -5,6 +5,94 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-28 — RPM format (tenth format landed)
+
+**Decision:** Implement Forgejo's RPM registry as the tenth package
+format. Mounts at `/api/packages/:tenant/rpm/:group/` with a
+free-form `:group` segment (e.g. `el9`, `fedora41`, `stable`) that
+acts as an independent repository scope. Routes:
+`/repository.key` + `/repository.repo` + `/repodata/:filename` +
+`/package/:name/:version/:architecture/:filename` + `PUT /upload` +
+`DELETE /package/:name/:version/:architecture`. Ported from
+`forgejo/routers/api/packages/rpm/rpm.go`,
+`forgejo/modules/packages/rpm/metadata.go`, and
+`forgejo/services/packages/rpm/repository.go`.
+
+**Library reuse — go-rpmutils.** The upstream parser is a thin
+wrapper around `github.com/sassoftware/go-rpmutils`. We pull in the
+same dep (Apache-2.0) rather than rolling our own RPM header parser
+— the binary RPM header format is non-trivial and the upstream
+library has been hardened against malformed input in production.
+This is the same posture we took with `blakesmith/ar` + `ulikunitz/xz`
+for Debian and `klauspost/compress/zstd` for OCI.
+
+**On-demand index generation + Stable-Bytes-for-signed-on-demand-content.**
+Same on-demand-not-cached choice as Debian, Maven, and Alpine. The
+`<timestamp>` field in `repomd.xml` is derived from
+`max(file.created_unix)` across the group rather than `time.Now()`,
+so two separate GETs for `/repodata/repomd.xml` and
+`/repodata/repomd.xml.asc` produce byte-identical repomd bytes that
+the detached signature verifies against. This is the canonical
+application of the "Stable bytes for signed-on-demand content"
+playbook pattern first codified during the Debian work. Recorded in
+[docs/known-deviations-from-spec.md](docs/known-deviations-from-spec.md).
+
+**Per-tenant OpenPGP keypair on `_rpm`.** Matches the Debian/Alpine
+key-storage pattern: a synthetic `_rpm` package row scoped to the
+tenant holds the keypair (private in `SETTING.value`, public in
+`SETTING.value`, both `KEY_VERSION` rows). First read of
+`/repository.key` lazily generates it (gated by `ExclusivePool` keyed
+on `<tenant>|rpm-key` to avoid the read-with-update fast-paths racing
+against each other).
+
+**Composite-key file naming.** Same Debian/Alpine pattern: a file's
+`name` column encodes `<group>|<arch>|<basename>` so the existing
+`UNIQUE(version_id, name)` constraint holds across multi-arch
+publishes without a schema change. `loadEntriesForGroup` drains the
+cursor before issuing the inner query that pulls each file's bytes,
+keeping us safely off SQLITE_BUSY territory (same fix as Alpine).
+
+**Single-segment group scope for the MVP.** Forgejo accepts arbitrary
+multi-segment groups (`el9/extras/x86_64`-style). We accept only one
+segment in this first cut: it covers the common dnf use case (one
+group per OS release or channel) and keeps the route shape and the
+composite-key encoder simple. Easy to relax later — bump
+`storedFileName` to encode the full group and adjust the
+`:group` route binding to a wildcard. No data migration required;
+existing single-segment names are a strict prefix of the more
+general form.
+
+**Black-box stack: fedora:41.** Real `rpm --import` of the
+`/repository.key` payload + a `/etc/yum.repos.d/pkgmirror.repo`
+written with `gpgcheck=1` + `repo_gpgcheck=1` + `gpgkey=file://...`
++ `dnf makecache` + `dnf info gitea-test`. dnf 5 honors the chain
+end-to-end. Two non-obvious client gotchas worth surfacing:
+
+  1. dnf 5 ships in fedora:41; its credential plumbing is fussier
+     than dnf 4's, so the simplest portable form is an authed
+     `baseurl=http://x:$TOKEN@host/...` rather than an external
+     credential helper. Documented in the README.
+  2. fedora:41 ships its own default repos that try to fetch from
+     `mirrors.fedoraproject.org` even when `--repo=pkgmirror-test`
+     is passed; remove `/etc/yum.repos.d/*fedora*.repo` before the
+     test exercises `dnf makecache`.
+
+**Trade-offs / what I'd revisit:**
+
+- Multi-segment groups (above) — would unblock the Forgejo
+  `el9/extras/x86_64` layout for users migrating an existing tree.
+- No SQLite-stored repodata cache. With ~thousands of packages per
+  group the on-demand path is comfortable; past 50k it'd be worth
+  measuring before committing to a cache.
+- The `_rpm` synthetic key-holder is per-tenant; key rotation
+  requires deleting the synthetic package and re-issuing the
+  `.repo`/`rpm --import` pair. Fine for now.
+- Source RPMs (.src.rpm) round-trip but their architecture is
+  reported as `src`. We don't currently special-case the
+  `repodata`'s `<arch>` field. Forgejo doesn't either.
+
+---
+
 ## 2026-05-28 — Automated guard against the duplicate-`package` artifact
 
 **Symptom.** Several times during the multi-month build, a Go file

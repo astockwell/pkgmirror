@@ -78,3 +78,53 @@ NuGet signed packages, etc.) will face the same constraint and
 should follow the same data-derived-timestamp approach.
 
 ---
+
+## RPM (`yum` / `dnf`)
+
+### `repomd.xml` `<timestamp>` is derived from data state, not wall-clock
+
+**Spec:** the createrepo metadata format defines the `<timestamp>`
+element on each `<data>` entry inside `repomd.xml` as the
+generation time of the referenced file. In practice, createrepo
+writes the value of `time.time()` at index-build time.
+
+**What pkgmirror does:** sets the `<timestamp>` for every `<data>`
+entry to `max(file.created_unix)` across the group — i.e. the
+timestamp of the most recent `.rpm` upload in the group, not the
+moment `repomd.xml` was generated. See
+[`internal/packages/rpm/index.go`](../internal/packages/rpm/index.go)
+`BuildAll`, and the corresponding handler call in
+[`internal/packages/rpm/handler.go`](../internal/packages/rpm/handler.go)
+which derives the timestamp from the entries.
+
+**Why.** Same reason as Debian's `Release.Date`: pkgmirror generates
+the `repomd.xml` + `repomd.xml.asc` pair on demand per request rather
+than persisting them as file rows. `dnf` fetches the two in
+independent HTTP requests; if the timestamp were `time.Now()`, the
+bytes of `repomd.xml` would drift between the two requests, the
+detached signature wouldn't validate against the body dnf actually
+sees, and `dnf makecache` would fail with a GPG verification error.
+
+Deriving the timestamp from the data state guarantees byte-identical
+`repomd.xml` bodies across requests until a new upload lands, which
+is exactly the invariant the signature requires.
+
+**Observable impact.** None for `dnf`'s install / update path. dnf
+uses `<timestamp>` only as a hint for cache freshness; it relies on
+the file digests inside `repomd.xml` (and the GPG signature) for
+correctness. If you `cat repomd.xml` immediately after publishing a
+new `.rpm`, the `<timestamp>` will match the upload's `created_unix`
+rather than the current clock — usually within a few seconds either
+way.
+
+**Operator hook.** Same as Debian: persist the repomd triple as file
+rows if you need spec-literal timestamps. Synthetic `_rpm` package
+row and the ExclusivePool keygen lock are already in place; only the
+build-on-write trigger and file row writes would need to be added.
+
+**Cross-reference.** Second instance of the
+[Stable bytes for signed-on-demand
+content](adding-a-format.md#stable-bytes-for-signed-on-demand-content)
+pattern. Debian was first.
+
+---

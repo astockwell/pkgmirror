@@ -24,6 +24,7 @@ const (
 	TypeAlpine    Type = "alpine"
 	TypeMaven     Type = "maven"
 	TypeDebian    Type = "debian"
+	TypeRPM       Type = "rpm"
 )
 
 // PropertyRefType identifies the entity a property is attached to.

@@ -21,6 +21,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/packages/maven"
 	"github.com/astockwell/pkgmirror/internal/packages/npm"
 	"github.com/astockwell/pkgmirror/internal/packages/pypi"
+	"github.com/astockwell/pkgmirror/internal/packages/rpm"
 	"github.com/astockwell/pkgmirror/internal/packages/rubygems"
 	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
@@ -88,6 +89,9 @@ func New(d Deps) (*gin.Engine, error) {
 
 	debianGroup := r.Group("/api/packages/:tenant/debian")
 	debian.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(debianGroup)
+
+	rpmGroup := r.Group("/api/packages/:tenant/rpm")
+	rpm.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(rpmGroup)
 
 	// Container (OCI) lives at the root /v2/... per the OCI distribution
 	// spec; clients don't tolerate a path prefix. Tenant is the first

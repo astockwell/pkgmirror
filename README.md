@@ -15,7 +15,7 @@ there's one place to answer from.
 
 ## Status
 
-Nine formats shipped, plus a working policy + audit engine. Active
+Ten formats shipped, plus a working policy + audit engine. Active
 development; APIs surface-area-stable but no LTS guarantees yet.
 
 ### Package formats
@@ -29,7 +29,8 @@ development; APIs surface-area-stable but no LTS guarantees yet.
 - [x] Alpine (`alpine`) — `apk add` / `apk update`, signed APKINDEX.tar.gz, per-tenant RSA key
 - [x] Maven (`maven`) — `mvn deploy` / `mvn dependency:get`, POM metadata extraction, generated maven-metadata.xml, SHA-1/MD5/SHA-256/SHA-512 sidecar verification
 - [x] Debian (`debian`) — `apt update` / `apt-cache show`, on-demand Packages/Release indices, per-tenant OpenPGP signing (Release.gpg + InRelease)
-- [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, Swift, RPM, ALT, Arch, CRAN, Vagrant, Chef
+- [x] RPM (`rpm`) — `dnf install` / `dnf info`, on-demand primary/filelists/other + repomd.xml indices, per-tenant OpenPGP-signed `repomd.xml.asc`
+- [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, Swift, ALT, Arch, CRAN, Vagrant, Chef
 
 Every format goes through the same ingest / storage / serve pipeline, so
 the supply-chain controls below apply uniformly across all of them.
@@ -525,6 +526,68 @@ The `Date:` field in `Release` is derived from the newest file in the
 distribution so the detached signature in `Release.gpg` matches the
 plain `Release` body byte-for-byte across separate requests.
 
+## Using the RPM registry
+
+The RPM endpoints are rooted at
+`/api/packages/:tenant/rpm/:group/`. `:group` is a free-form label
+that groups packages into independent repositories (one per OS
+release, channel, etc.) — commonly `el9`, `fedora41`, `stable`,
+etc. Multi-segment groups are not currently supported.
+
+Grab the per-tenant GPG public key and the dnf `.repo` file (the
+`.repo` file detects http/https automatically based on how it was
+fetched):
+
+```sh
+sudo curl -fsS \
+    -o /etc/pki/rpm-gpg/RPM-GPG-KEY-pkgmirror \
+    http://localhost:8080/api/packages/default/rpm/el9/repository.key
+sudo curl -fsS \
+    -o /etc/yum.repos.d/pkgmirror.repo \
+    http://localhost:8080/api/packages/default/rpm/el9/repository.repo
+sudo rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-pkgmirror
+sudo dnf makecache --repo=pkgmirror-default-el9
+```
+
+If the tenant is private, dnf needs credentials. The simplest
+portable form is an authed `baseurl` written by hand:
+
+```ini
+[pkgmirror-default-el9]
+name=pkgmirror default/el9
+baseurl=http://x:$PKGMIRROR_ADMIN_TOKEN@localhost:8080/api/packages/default/rpm/el9
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-pkgmirror
+```
+
+Upload an `.rpm`. Name / version / release / architecture are parsed
+out of the binary RPM header:
+
+```sh
+curl -fsS -X PUT \
+    -u x:$PKGMIRROR_ADMIN_TOKEN \
+    --data-binary @./mypackage-1.0.0-1.x86_64.rpm \
+    http://localhost:8080/api/packages/default/rpm/el9/upload
+```
+
+Delete a published `.rpm`:
+
+```sh
+curl -fsS -X DELETE \
+    -u x:$PKGMIRROR_ADMIN_TOKEN \
+    http://localhost:8080/api/packages/default/rpm/el9/package/mypackage/1.0.0-1/x86_64
+```
+
+The `repodata/{repomd,primary,filelists,other}.xml*` files and the
+detached `repodata/repomd.xml.asc` are all generated on demand from
+the live package list. The `<timestamp>` in `repomd.xml` is derived
+from the newest file in the group so the signature stays valid across
+separate requests — same Stable-Bytes pattern as Debian. See
+[docs/known-deviations-from-spec.md](docs/known-deviations-from-spec.md)
+for the details.
+
 ## TLS
 
 pkgmirror can terminate TLS itself. Set both
@@ -585,6 +648,7 @@ internal/packages/    format-agnostic service layer (create package + file)
   alpine/             .apk PKGINFO parser + APKINDEX.tar.gz builder + RSA signing
   maven/              pom.xml parser + maven-metadata.xml generator + checksum sidecars
   debian/             .deb parser + on-demand Packages/Release builder + OpenPGP signing
+  rpm/                .rpm header parser + on-demand repomd/primary/filelists/other + OpenPGP signing
 internal/server/      Gin router + middleware
 internal/ui/          Bootstrap-based HTML UI
 templates/            html/template files

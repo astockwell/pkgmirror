@@ -219,6 +219,48 @@ adaptation.
   ExclusivePool guard around first-time key generation are all
   modeled on upstream.
 
+#### RPM
+
+- [`internal/packages/rpm/parser.go`](internal/packages/rpm/parser.go)
+  ← `modules/packages/rpm/metadata.go` — direct transliteration of
+  the upstream parser. We use the same library (`go-rpmutils`) and
+  the same `Package` / `VersionMetadata` / `FileMetadata` /
+  `Entry` / `File` / `Changelog` shapes. Dropped the upstream
+  `repoType="alt"` branch (ALT Linux remains on the not-yet-shipped
+  list); the rest is faithful, including the project-URL sanity
+  check and the `(name, ver, rel, arch, epoch).rpm` filename
+  convention used downstream.
+- [`internal/packages/rpm/parser_test.go`](internal/packages/rpm/parser_test.go)
+  ← `modules/packages/rpm/metadata_test.go` — embeds the same
+  upstream `gitea-test 1.0.2-1.x86_64.rpm` fixture (base64+gzip)
+  and asserts field-by-field on the parsed metadata.
+- [`internal/packages/rpm/index.go`](internal/packages/rpm/index.go)
+  ← `services/packages/rpm/repository.go` — the four-file repodata
+  layout (`primary.xml.gz` + `filelists.xml.gz` + `other.xml.gz` +
+  `repomd.xml`), the XML element shapes (`<metadata>` /
+  `<filelists>` / `<otherdata>`), the per-tenant OpenPGP keypair
+  generator stored on a synthetic `_rpm` package row, and the
+  detached `repomd.xml.asc` clearsign step are all modeled on
+  upstream. One deviation, same as Debian: we derive the
+  `<timestamp>` in `repomd.xml` from `max(file.created_unix)`
+  across the group rather than `time.Now()`, so two separate GETs
+  for `/repodata/repomd.xml` and `/repodata/repomd.xml.asc` produce
+  byte-identical repomd bytes that the signature verifies against.
+  Forgejo dodges this by persisting repomd as a file row at build
+  time; we generate on demand.
+- [`internal/packages/rpm/handler.go`](internal/packages/rpm/handler.go)
+  ← `routers/api/packages/rpm/rpm.go` — the route shape
+  (`/repository.key`, `/repository.repo`, `/repodata/...`,
+  `/package/...`, `/upload`), the composite-key file storage
+  (`<group>|<arch>|<basename>` in the file Name) that lets multiple
+  architectures share a UNIQUE(version_id, name) without a schema
+  change, HEAD-for-existence-check support, and the per-tenant
+  ExclusivePool guard around first-time key generation are all
+  modeled on upstream. The dnf `.repo` file generator
+  (`BuildRepoConfig`) mirrors upstream's
+  `RepositoryConfiguration` output verbatim except we auto-detect
+  http vs https from the request `TLS` field.
+
 ---
 
 ## OCI Distribution Spec
