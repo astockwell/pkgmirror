@@ -94,7 +94,7 @@ func newTestFixture(t *testing.T) *testFixture {
 		t.Fatalf("bootstrap did not generate an admin token")
 	}
 
-	blobs, err := storage.NewFS(filepath.Join(dir, "blobs"))
+	blobs, err := storage.NewLocalStorage(context.Background(), filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("open blob storage: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestPublicTenantAllowsAnonRead(t *testing.T) {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
-	blobs, _ := storage.NewFS(filepath.Join(dir, "blobs"))
+	blobs, _ := storage.NewLocalStorage(context.Background(), filepath.Join(dir, "blobs"))
 	svc := pkgsvc.NewService(pkgModels, blobs)
 	authn := &auth.TokenAuthenticator{Tokens: tokenStore, Users: userStore, Tenants: tenantStore}
 	engine, err := server.New(server.Deps{

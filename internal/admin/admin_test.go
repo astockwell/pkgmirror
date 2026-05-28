@@ -60,7 +60,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
-	blobs, _ := storage.NewFS(filepath.Join(dir, "blobs"))
+	blobs, _ := storage.NewLocalStorage(context.Background(), filepath.Join(dir, "blobs"))
 	svc := pkgsvc.NewService(pkgModels, blobs)
 	ruleStore := policy.NewRuleStore(db)
 	auditLogger := audit.New(db, 256)

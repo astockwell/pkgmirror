@@ -68,7 +68,7 @@ func main() {
 		log.Printf("======================================================================")
 	}
 
-	blobs, err := storage.NewFS(cfg.BlobDir)
+	blobs, err := storage.NewLocalStorage(context.Background(), cfg.BlobDir)
 	if err != nil {
 		log.Fatalf("open blob storage: %v", err)
 	}

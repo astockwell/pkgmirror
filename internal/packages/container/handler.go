@@ -799,7 +799,7 @@ func (h *Handler) finalizeUpload(c *gin.Context, tenant *tenants.Tenant, image, 
 			return
 		}
 	}
-	file, _, gotDigest, err := h.Uploads.Finalize(uuid, digest)
+	file, size, gotDigest, err := h.Uploads.Finalize(uuid, digest)
 	if err != nil {
 		if errors.Is(err, ErrNoSuchUpload) {
 			writeError(c, http.StatusNotFound, "BLOB_UPLOAD_UNKNOWN", "%v", err)
@@ -818,7 +818,7 @@ func (h *Handler) finalizeUpload(c *gin.Context, tenant *tenants.Tenant, image, 
 
 	// Drain file into blob storage + compute the other hashes we record
 	// in the blob row.
-	blob, err := h.storeStagedFile(c, file, gotDigest)
+	blob, err := h.storeStagedFile(c, file, gotDigest, size)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "%v", err)
 		return
@@ -861,8 +861,8 @@ func (h *Handler) storeBytes(c *gin.Context, b []byte) (*models.Blob, error) {
 	sha512Sum := sha512.Sum512(b)
 	sha256Hex := hex.EncodeToString(sha256Sum[:])
 
-	if err := h.Service.Storage.Put(sha256Hex, bytes.NewReader(b)); err != nil {
-		return nil, fmt.Errorf("storage put: %w", err)
+	if _, err := h.Service.Storage.Save(sha256Hex, bytes.NewReader(b), int64(len(b))); err != nil {
+		return nil, fmt.Errorf("storage save: %w", err)
 	}
 	return h.Models.GetOrCreateBlob(c.Request.Context(), models.Blob{
 		Size:       int64(len(b)),
@@ -885,8 +885,8 @@ func (h *Handler) dummyBuf(b []byte) *pkgsvc.HashedBuffer {
 
 // storeStagedFile copies the bytes from an already-finalized upload temp
 // file into the permanent blob store, computing the missing hashes
-// along the way.
-func (h *Handler) storeStagedFile(c *gin.Context, file io.ReadSeeker, digest string) (*models.Blob, error) {
+// along the way. size is the known byte count from the upload tracker.
+func (h *Handler) storeStagedFile(c *gin.Context, file io.ReadSeeker, digest string, size int64) (*models.Blob, error) {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
@@ -896,15 +896,9 @@ func (h *Handler) storeStagedFile(c *gin.Context, file io.ReadSeeker, digest str
 	tee := io.TeeReader(file, io.MultiWriter(md5h, sha1h, sha512h))
 
 	sha256Hex := DigestSHA256(digest)
-	if err := h.Service.Storage.Put(sha256Hex, tee); err != nil {
-		return nil, fmt.Errorf("storage put: %w", err)
+	if _, err := h.Service.Storage.Save(sha256Hex, tee, size); err != nil {
+		return nil, fmt.Errorf("storage save: %w", err)
 	}
-	// Stat for size: rewind and count via a discard-copy. Slightly
-	// wasteful but the file is already on local disk.
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	size, _ := io.Copy(io.Discard, file)
 
 	return h.Models.GetOrCreateBlob(c.Request.Context(), models.Blob{
 		Size:       size,

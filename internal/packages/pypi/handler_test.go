@@ -56,7 +56,7 @@ func newFixture(t *testing.T, vis tenants.Visibility) *fixture {
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	blobs, _ := storage.NewFS(filepath.Join(dir, "blobs"))
+	blobs, _ := storage.NewLocalStorage(context.Background(), filepath.Join(dir, "blobs"))
 	svc := pkgsvc.NewService(pkgModels, blobs)
 	engine, err := server.New(server.Deps{
 		Service:   svc,

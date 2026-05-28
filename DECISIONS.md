@@ -5,6 +5,91 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-28 — Storage interface re-shaped to match Forgejo's ObjectStorage
+
+**Decision:** Replace the local 3-method `storage.Backend` interface
+(`Put` / `Open` / `Delete`) with a faithful port of
+[`forgejo/modules/storage.ObjectStorage`](forgejo/modules/storage/storage.go).
+Six methods (`Open`, `Save`, `Stat`, `Delete`, `URL`, `IterateObjects`)
+plus a richer `Object` return type that satisfies `io.ReadCloser +
+io.Seeker + Stat() (os.FileInfo, error)`. The single implementation,
+`LocalStorage`, ports the matching `forgejo/modules/storage.LocalStorage`.
+
+**Why this shape and not my own:** Forgejo's `ObjectStorage` has been
+through years of production use across LFS, package storage, avatars,
+attachments, and now multiple cloud backends (MinIO is the canonical
+remote impl). The original three-method interface I wrote was
+filesystem-shaped — it lacked size-passing on `Save`, a stand-alone
+`Stat`, a pre-signed-URL hook, and an iterator for GC. All four gaps
+were going to be hit the moment we added a second backend; better to
+adopt the battle-tested shape now while there's one caller-cluster to
+migrate.
+
+**Mapping:**
+
+| New (mirrors Forgejo) | Old |
+| --- | --- |
+| `ObjectStorage.Open(path) (Object, error)` | `Backend.Open(key) (io.ReadSeekCloser, error)` |
+| `ObjectStorage.Save(path, r, size) (int64, error)` | `Backend.Put(key, r) error` |
+| `ObjectStorage.Stat(path) (os.FileInfo, error)` | — *(callers fell back to the DB row's `size`)* |
+| `ObjectStorage.Delete(path) error` | `Backend.Delete(key) error` |
+| `ObjectStorage.URL(path, name, params) (*url.URL, error)` | — *(no pre-signed redirect hook)* |
+| `ObjectStorage.IterateObjects(prefix, fn) error` | — *(no iteration; GC was impossible)* |
+| `Object` (Read + Close + Seek + Stat) | `io.ReadSeekCloser` |
+
+**Implementation:** `LocalStorage` keeps the two-level on-disk sharding
+(`<root>/<aa>/<bb>/<full-path>`) as a private optimization — Forgejo's
+`LocalStorage` doesn't shard because their caller-side IDs are
+typically small ints, but we're keyed by sha256 hex digests at every
+path, so sharding cheaply caps directory fan-out. `IterateObjects` is
+careful to strip the on-disk shard prefix before invoking the callback
+so callers see the logical key they originally passed to `Save`.
+
+**Compatibility:** None — `Backend` is gone. Internal-only interface
+with five direct callers (`internal/packages/service.go` × 2,
+`internal/packages/container/handler.go` × 4); all migrated in this
+commit. Test fixtures updated by a single `sed` (`NewFS` →
+`NewLocalStorage(ctx, root)`).
+
+**Small wins enabled by the new shape (already cashed in):**
+
+- The OCI upload path now passes the staged-file size all the way
+  through to `Save` instead of doing a wasteful discard-copy after the
+  fact. Saved one full file-rewind per blob upload.
+- `OpenFile` returns `storage.Object`, so OCI HEAD handlers could read
+  size from `obj.Stat()` instead of a second DB lookup — not yet
+  rewired, but trivially available.
+
+**What's still ahead of us, made possible by the new shape:**
+
+- An S3 / MinIO backend is now a straight transliteration of
+  `forgejo/modules/storage/minio.go`. Same 6-method interface.
+- `URL()` enables 307 pre-signed-redirect responses for big-blob
+  pulls (especially OCI layers). `LocalStorage.URL` returns
+  `ErrURLNotSupported`; handlers fall back to streaming. Adding a
+  redirect path to e.g. the OCI blob handler is one `if err == nil
+  { c.Redirect(307, url.String()); return }`.
+- `IterateObjects` enables a real orphan-blob GC ("walk storage,
+  compare against `package_blobs` rows, delete anything not
+  referenced").
+
+**Tests:** 12 new unit tests for `LocalStorage` covering Save/Open/Stat
+round-trip, ErrNotFound on missing keys (Open + Stat), idempotent
+delete, atomic overwrite, unknown-size streaming (`size=-1`),
+`ErrURLNotSupported` from `URL()`, `IterateObjects` happy path +
+callback-error propagation + context cancellation, no-temp-file-
+leakage invariant, and Object seekability. All 50+ existing tests
+across the 5 package formats + admin + audit + 2 policy evaluators
+pass unchanged; all 5 docker-backed blackbox conformance suites
+(`go`, `pypi`, `npm`, `rubygems`, `container`) pass unchanged.
+
+**What I'd revisit:** the `ctx` we hand to `NewLocalStorage` is only
+consulted inside `IterateObjects`. Forgejo uses it more broadly for
+shutdown propagation; ours could too once we have long-running
+operations (GC, scheduled re-scans) plumbed in.
+
+---
+
 ## 2026-05-28 — Container/OCI: multi-segment image names
 
 **Decision:** Replace the single-segment `:image` routes with per-method

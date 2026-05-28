@@ -109,11 +109,11 @@ func (b *HashedBuffer) Close() error {
 // metadata store and a blob backend.
 type Service struct {
 	Models  *models.Store
-	Storage storage.Backend
+	Storage storage.ObjectStorage
 }
 
 // NewService constructs a Service.
-func NewService(m *models.Store, s storage.Backend) *Service {
+func NewService(m *models.Store, s storage.ObjectStorage) *Service {
 	return &Service{Models: m, Storage: s}
 }
 
@@ -168,7 +168,7 @@ func (s *Service) CreatePackageAndAddFile(ctx context.Context, info CreationInfo
 	if _, err := buf.Seek(0, io.SeekStart); err != nil {
 		return pkg, ver, nil, fmt.Errorf("rewind upload buffer: %w", err)
 	}
-	if err := s.Storage.Put(sha256Hex, buf); err != nil {
+	if _, err := s.Storage.Save(sha256Hex, buf, buf.Size()); err != nil {
 		return pkg, ver, nil, fmt.Errorf("store blob: %w", err)
 	}
 
@@ -243,7 +243,7 @@ func (s *Service) CreatePackageOrAddFileToExisting(ctx context.Context, info Cre
 	if _, err := buf.Seek(0, io.SeekStart); err != nil {
 		return pkg, ver, nil, fmt.Errorf("rewind upload buffer: %w", err)
 	}
-	if err := s.Storage.Put(sha256Hex, buf); err != nil {
+	if _, err := s.Storage.Save(sha256Hex, buf, buf.Size()); err != nil {
 		return pkg, ver, nil, fmt.Errorf("store blob: %w", err)
 	}
 	blob, err := s.Models.GetOrCreateBlob(ctx, models.Blob{
@@ -267,7 +267,10 @@ func (s *Service) CreatePackageOrAddFileToExisting(ctx context.Context, info Cre
 }
 
 // OpenFile returns a reader for the blob backing the given file row.
-func (s *Service) OpenFile(ctx context.Context, f *models.File) (io.ReadSeekCloser, *models.Blob, error) {
+// The returned Object satisfies io.ReadSeekCloser plus Stat, so handlers
+// can answer HEAD requests' Content-Length from the open object without
+// a second model lookup.
+func (s *Service) OpenFile(ctx context.Context, f *models.File) (storage.Object, *models.Blob, error) {
 	blob, err := s.openBlob(ctx, f.BlobID)
 	if err != nil {
 		return nil, nil, err

@@ -63,7 +63,7 @@ func newPyPIFixtureWithCooldown(t *testing.T, minAgeDays int) (
 		t.Fatalf("bootstrap: %v", err)
 	}
 
-	blobs, _ := storage.NewFS(filepath.Join(dir, "blobs"))
+	blobs, _ := storage.NewLocalStorage(context.Background(), filepath.Join(dir, "blobs"))
 	svc := pkgsvc.NewService(pkgModels, blobs)
 
 	// Install a cooldown rule via the rule store.
