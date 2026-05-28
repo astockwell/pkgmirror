@@ -41,6 +41,7 @@ func New(d Deps) (*gin.Engine, error) {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 	r.Use(auth.Middleware(d.Authenticator))
+	r.Use(policyActorMiddleware())
 
 	tmpl, err := template.New("").Funcs(template.FuncMap{
 		"humanBytes": humanBytes,

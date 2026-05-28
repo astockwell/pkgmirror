@@ -139,6 +139,24 @@ func (s *Store) SetVisibility(ctx context.Context, tenantID int64, vis Visibilit
 	return err
 }
 
+// AuditReadsEnabled reports whether the tenant has opted into auditing
+// successful read events. Used by the audit-wrapping policy engine to
+// gate the high-volume "successful download" stream. Tenants that don't
+// exist (or transient DB errors) return false; an unaudit-able tenant is
+// preferable to a failed request.
+func (s *Store) AuditReadsEnabled(ctx context.Context, tenantID int64) bool {
+	if tenantID == 0 {
+		return false
+	}
+	var v int
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT audit_reads FROM tenants WHERE id = ?`, tenantID).Scan(&v)
+	if err != nil {
+		return false
+	}
+	return v != 0
+}
+
 // Memberships returns the (tenantID -> role) map for a user.
 func (s *Store) Memberships(ctx context.Context, userID int64) (map[int64]Role, error) {
 	rows, err := s.DB.QueryContext(ctx,

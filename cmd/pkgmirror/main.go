@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/astockwell/pkgmirror/assets"
+	"github.com/astockwell/pkgmirror/internal/audit"
 	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/bootstrap"
 	"github.com/astockwell/pkgmirror/internal/config"
@@ -77,16 +78,22 @@ func main() {
 		Tenants: tenantStore,
 	}
 
+	// Supply-chain policy engine. Step 1-3 of the plan: a no-op core
+	// engine wrapped with audit logging. Real evaluators land in step 5+.
+	auditLogger := audit.New(dbConn, 4096)
+	defer auditLogger.Close()
+	pruneCtx, prunecancel := context.WithCancel(context.Background())
+	defer prunecancel()
+	audit.StartPruner(pruneCtx, dbConn)
+	engine := audit.WrapEngine(policy.NoopEngine{}, auditLogger, tenantStore)
+
 	r, err := server.New(server.Deps{
 		Service:       svc,
 		Models:        pkgModels,
 		Tenants:       tenantStore,
 		Authenticator: authn,
-		// Step 1 of the supply-chain policy engine plan: a no-op engine
-		// plumbed through every handler with zero behavior change. Real
-		// evaluators (cooldown, license allowlist) land in later steps.
-		Engine:    policy.NoopEngine{},
-		Templates: assets.Templates(),
+		Engine:        engine,
+		Templates:     assets.Templates(),
 	})
 	if err != nil {
 		log.Fatalf("build server: %v", err)
