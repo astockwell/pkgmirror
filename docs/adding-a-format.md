@@ -1222,6 +1222,10 @@ reference implementation.
   where pkgmirror's wire behavior intentionally differs from the
   canonical format spec. If your new format ends up needing one, add
   an entry there too.
+- [long-term-maintenance.md](long-term-maintenance.md) — friction-point
+  inventory: every new format adds entries to its §3 (Docker image
+  pin) and §1 (spec source) tables. Don't forget to extend them when
+  you ship.
 - [../ATTRIBUTIONS.md](../ATTRIBUTIONS.md) — file-by-file mapping of
   every adapted source file. New ports should add an entry here.
 - The MIT LICENSE at the repo root, and the SPDX headers on existing

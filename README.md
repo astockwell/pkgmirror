@@ -814,6 +814,13 @@ docs/                 operator + developer documentation
 - [docs/known-deviations-from-spec.md](docs/known-deviations-from-spec.md) —
   where pkgmirror's wire behavior intentionally differs from canonical
   format specs (e.g. how the Debian `Release.Date` field is derived)
+- [docs/long-term-maintenance.md](docs/long-term-maintenance.md) —
+  the friction-points inventory: what rots over time (spec drift,
+  pinned Docker tags, Forgejo port drift, etc.) and how / whether
+  we can detect it ahead of a user-facing break
+- [docs/maintenance-skill.md](docs/maintenance-skill.md) —
+  step-by-step runbook for the quarterly health pass; designed to
+  be runnable by an LLM agent or a fresh contributor
 - [DECISIONS.md](DECISIONS.md) — running log of architectural decisions
   and assumptions
 - [ATTRIBUTIONS.md](ATTRIBUTIONS.md) — file-by-file mapping of every
