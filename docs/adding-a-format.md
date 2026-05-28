@@ -1,15 +1,22 @@
 # Adding a package format
 
 This document is the implementation playbook for every package format the
-mirror supports. It's structured into three parts:
+mirror supports. It's structured into five parts:
 
 1. **[Anatomy](#anatomy-of-a-format)** — the components every format needs
    and how they fit into the existing pkgmirror tree.
-2. **[Reference: Forgejo / Gitea](#reference-forgejo--gitea)** — the
+2. **[Cross-cutting patterns](#cross-cutting-patterns)** — primitives and
+   patterns that recur across formats (multi-file upload locking,
+   on-demand index generation, synthesized checksums, per-tenant signing
+   keys, etc.). Reach for these before re-inventing.
+3. **[Reference: Forgejo / Gitea](#reference-forgejo--gitea)** — the
    most important resource we have. Forgejo already implements every
    format on the roadmap. We should heavily borrow from it, with
    attribution.
-3. **[Per-format recipes](#per-format-recipes)** — for each format on the
+4. **[Common pitfalls](#common-pitfalls)** — the bugs that cost real
+   debugging time, with the fixes that work. Read this before writing
+   your handler.
+5. **[Per-format recipes](#per-format-recipes)** — for each format on the
    roadmap, the protocol summary, links to the upstream Forgejo files to
    crib from, parser/handler complexity notes, and the docker image +
    commands the black-box conformance test should drive.
@@ -39,10 +46,16 @@ already exists):
 - The `packages` / `package_versions` / `package_files` / `package_blobs` /
   `package_properties` schema — extend `package_properties` for any
   format-specific metadata you can't fit elsewhere; do not add new tables
-  without a strong reason.
+  without a strong reason. Adding new `*models.Store` methods (e.g.
+  `UpdateVersionMetadata` for Maven) is fine and expected — the rule is
+  about schema, not API surface.
 - `pkgsvc.HashedBuffer` / `pkgsvc.Service.CreatePackageAndAddFile` /
   `storage.FS` — the upload, hashing, and content-addressed blob storage
   pipeline. Every format funnels through these.
+- `internal/syncutil.ExclusivePool` — refcount-driven per-key mutex pool.
+  Use it whenever a format publishes multiple files for the same
+  coordinate (Maven jar + pom + sources.jar; Debian deb + dsc; NuGet
+  nupkg + snupkg). See [Cross-cutting patterns](#cross-cutting-patterns).
 - The auth middleware and `RequireRead` / `RequireWrite` helpers.
 - The Bootstrap UI, tenant resolution from `:tenant` path param,
   `WWW-Authenticate` challenge on 401.
@@ -53,31 +66,52 @@ already exists):
 2. **Read Forgejo's implementation** (see [Reference](#reference-forgejo--gitea)).
 3. **Port the parser** into `internal/packages/<fmt>/parser.go`. Keep it
    pure (no DB, no HTTP). Add SPDX + Forgejo attribution headers — see
-   [Attribution](#attribution-to-forgejo--gitea).
+   [Attribution](#attribution-to-forgejo--gitea). If the format has a
+   declared license in its metadata (POM `<licenses>`, PKGINFO `license`,
+   `Chart.yaml` `license`, etc.), surface it on the parsed metadata
+   struct — the handler will pass it to `models.SetLicense` so it
+   reaches the supply-chain policy engine.
 4. **Port unit tests** from `forgejo/modules/packages/<fmt>/metadata_test.go`
    into `internal/packages/<fmt>/parser_test.go`. The fixtures Forgejo
-   uses are typically inlined in the test file; bring them across.
+   uses are typically inlined in the test file; bring them across with
+   the same test names so future cross-references against upstream stay
+   readable.
 5. **Implement the handlers** in `internal/packages/<fmt>/handler.go`.
    Follow `goproxy/handler.go`'s shape:
    - `Handler` struct holds `*pkgsvc.Service`, `*models.Store`,
-     `*tenants.Store`.
-   - `Register(g *gin.RouterGroup)` mounts the routes.
+     `*tenants.Store`, `policy.Engine`, plus any format-specific state
+     (e.g. an `*syncutil.ExclusivePool` for multi-file upload formats).
+   - `Register(g *gin.RouterGroup)` mounts the routes. If the protocol's
+     URL shape is deeply hierarchical (Maven, Container, Generic), use a
+     gin `*path` catch-all and parse the tail in the handler. Note gin
+     catch-all params are returned with a leading `/`; strip it.
    - Each handler:
      1. Resolves tenant from `:tenant` path param via `tenantFromPath`.
      2. Calls `auth.RequireRead` or `RequireWrite`.
      3. Delegates to models / service.
      4. Maps sentinel errors to HTTP status (404, 409, etc.).
+   - If clients use `HEAD` for existence checks (Gradle's Maven cache,
+     OCI clients, NuGet) wire a `HEAD` handler alongside `GET` — gin
+     doesn't auto-derive one.
 6. **Wire the route** in `internal/server/server.go` (one line — a new
    `r.Group("/api/packages/:tenant/<fmt>")` and a `Register` call).
 7. **Add grey-box tests** in `internal/packages/<fmt>/handler_test.go`
    modeled on `goproxy/handler_test.go`: spin up `httptest.NewServer`,
    exercise the protocol end-to-end including auth gates (401 on private
-   tenant, 201 on upload, 200 on read, 409 on dup, etc.).
+   tenant, 201 on upload, 200 on read, 409 on dup, etc.). **Include the
+   explicit `_ = os.RemoveAll(dir)` in the fixture's `t.Cleanup`** —
+   `t.TempDir`'s auto-cleanup races SQLite WAL teardown on macOS APFS;
+   every existing grey-box fixture has this and it's load-bearing.
 8. **Add a black-box conformance suite** in
    `tests/blackbox/<fmt>/conformance_test.go` per the per-format recipe.
 9. **Pre-pull the client image** in `.github/workflows/ci.yml` `images=()`
    array.
-10. **Update DECISIONS.md** with any non-obvious choices.
+10. **Stress-test before declaring done.** Run
+    `for i in $(seq 1 15); do go test ./... -count=1 -timeout 300s || break; done`.
+    This catches the SQLite WAL races, RSA-keygen timeouts, and
+    test-ordering bugs that a single run won't surface. Both Alpine
+    bugs were caught this way after I had already committed.
+11. **Update DECISIONS.md** with any non-obvious choices.
 
 ### Format-specific metadata: `package_properties`
 
@@ -90,11 +124,211 @@ Forgejo uses it the same way. Examples:
 | `go` | `go.mod` (full text of the module's go.mod) |
 | `npm` | `npm.tag.latest`, `npm.tag.next`, etc. (dist-tag → version) |
 | `container` | manifest digest, media type, layer digests |
-| `maven` | groupId, artifactId, packaging, classifier |
+| `alpine` | `alpine.branch`, `alpine.repository`, `alpine.architecture`, `alpine.metadata` (JSON) per file; signing keys per synthetic `_alpine` package |
 | `rubygems` | platform, ruby_version requirement |
+| `maven` | (none yet — POM metadata fits in `versions.metadata_json`; future SNAPSHOT + classifier work would land here) |
 
 When in doubt, look at how Forgejo encodes the same metadata
 (usually in `services/packages/<fmt>/<fmt>.go` or alongside the parser).
+
+### Implicit contracts of the shared layer
+
+- **`Models.ListVersions` returns versions oldest-first by `created_unix`.**
+  Maven's `maven-metadata.xml` generation depends on this for its
+  `<release>` and `<latest>` calculation; future Debian / RPM index
+  generation will too.
+- **`Service.CreatePackageOrAddFileToExisting` tolerates duplicate
+  version creation** (handy when multi-file uploads race; the second
+  caller re-fetches the existing row). It still returns
+  `models.ErrDuplicatePackageFile` if the exact `(version_id, name)`
+  is duplicated.
+- **`Service.NewHashedBuffer` stages under `Config.TmpDir`,** which is
+  on the same filesystem as `BlobDir` by default so the final move is a
+  cheap rename. Don't read the request body via any other path —
+  bypassing the staging buffer skips the multi-hash computation that
+  the policy engine and per-format checksums all depend on.
+- **`Service.OpenFile` returns `(storage.Object, *Blob, error)`** —
+  the Blob carries all four hashes, which is what handlers like Maven
+  use to synthesize checksum sidecars without re-reading the file.
+
+---
+
+## Cross-cutting patterns
+
+These patterns recur across formats. The first time we shipped one,
+the implementation was ad-hoc; subsequent formats benefited from the
+codified primitive. New formats should reach for these before
+re-inventing.
+
+### Multi-file upload serialization with `ExclusivePool`
+
+Many formats publish multiple files per coordinate in rapid succession
+(Maven's `jar` + `pom` + `sources.jar` + sidecar checksums; Debian's
+`.deb` + `.dsc` + `.changes`; NuGet's `.nupkg` + `.snupkg`). Without
+per-key serialization the concurrent `CreateVersion` calls race and
+produce spurious `ErrDuplicatePackageVersion` errors.
+
+The canonical primitive is `internal/syncutil.ExclusivePool` — a
+refcount-driven map of `*sync.Mutex` ported from Forgejo's
+`modules/sync` (originally from Gogs). It deletes per-key entries
+when the last holder checks out, so memory stays bounded by
+*concurrent* keys, not unique keys ever seen.
+
+```go
+type Handler struct {
+    // ...
+    uploads *syncutil.ExclusivePool
+}
+
+func NewHandler(...) *Handler {
+    return &Handler{ ..., uploads: syncutil.NewExclusivePool() }
+}
+
+func (h *Handler) handleUpload(c *gin.Context) {
+    key := fmt.Sprintf("%d|%s", tenant.ID, packageCoordinate)
+    h.uploads.CheckIn(key)
+    defer h.uploads.CheckOut(key)
+    // ...
+}
+```
+
+The lock granularity should match the unit of contention. Maven uses
+`(tenant, groupId:artifactId)` — one lock per artifact across all
+versions — because pom + jar + sources.jar all share the
+`groupId:artifactId:version` triple but a real publish typically
+only writes one version at a time. A per-version lock would also
+work; a per-(coordinate, file) lock would not serialize anything
+useful.
+
+### On-demand vs cached index generation
+
+Most formats expose a generated index file: Maven's
+`maven-metadata.xml`, Alpine's `APKINDEX.tar.gz`, Debian's
+`Packages` / `Release`, RPM's `repomd.xml`, Helm's `index.yaml`,
+NuGet's `index.json`.
+
+Forgejo persists these as `package_file` rows attached to a
+synthetic "internal" package and rebuilds them on every
+upload/delete. pkgmirror has chosen the opposite default: build
+on demand from the live version list, on every GET. The tradeoff:
+
+| Aspect | On-demand (pkgmirror) | Cached file (Forgejo) |
+| --- | --- | --- |
+| Coordination | None | Rebuild on every upload/delete |
+| Invalidation bugs | Impossible | A whole class of them |
+| Latency | O(versions) per GET | O(1) per GET, O(versions) per write |
+| Disk pressure | None | One row per arch / branch / etc. |
+
+The break-even is approximately "tens of thousands of versions per
+arch + multi-MB index". For everything we ship today, on-demand is
+sub-100ms and dodges cache-invalidation entirely. If a future format
+hits that scale we can introduce caching as a per-format optimization
+without changing the contract.
+
+### Synthesized checksum sidecars
+
+Maven, Debian, and RPM all expect `.md5/.sha1/.sha256/.sha512`
+sidecars adjacent to artifacts. **Do not store them as separate
+files.** The blob already carries all four hashes:
+
+- **On `GET .<hash>`:** return the relevant `blob.Hash<X>` as
+  `text/plain` hex.
+- **On `PUT .<hash>`:** read the supplied hex, compare to the stored
+  hash, return `200` on match or `400` on mismatch. Mismatch is a
+  real upload-corruption signal; surface it loudly.
+- **On the per-(group,artifact) index file's `.<hash>` sidecar:**
+  hash the generated index XML/text inline; that one we don't have
+  a blob for since the index isn't stored.
+
+See `internal/packages/maven/handler.go:hashChecksum` for the
+implementation.
+
+### Out-of-order upload metadata backfill
+
+For multi-file formats the canonical-metadata file (Maven's `.pom`,
+Debian's `.dsc`, NuGet's `.nuspec` from the zip) may arrive *after*
+a sibling artifact has already created the version row with empty
+metadata. Don't drop the second write on the floor — explicitly
+backfill:
+
+```go
+if isMetadataFile {
+    if err := h.Models.UpdateVersionMetadata(ctx, ver.ID, metaJSON); err != nil {
+        // ...
+    }
+    if licenseStr != "" {
+        _ = h.Models.SetLicense(ctx, ver.ID, licenseStr)
+    }
+}
+```
+
+`models.UpdateVersionMetadata` exists for exactly this case.
+
+### Per-tenant signing keys
+
+Alpine, Debian (`Release.gpg` / `InRelease`), and RPM all expect the
+registry to sign index files with a per-tenant key, and clients
+expect to install the matching public key in their trust store.
+
+The canonical pattern (modeled on Forgejo):
+
+1. Lazily generate the keypair on first signing request.
+2. Store the keypair as properties on a synthetic `_<format>` package
+   row scoped to the tenant (e.g. Alpine uses `_alpine`/`_repository`).
+3. Expose `GET /api/packages/:tenant/<format>/key` for clients to
+   download the public key with the right filename for their trust
+   store (`<owner>@<fingerprint>.rsa.pub` for apk, `repo.gpg` for
+   apt, etc.).
+
+See `internal/packages/alpine/index.go:GetOrCreateKeyPair` for the
+reference implementation.
+
+### License extraction → policy engine
+
+Every parser that can extract an SPDX (or SPDX-ish) license
+expression should return it on the parsed metadata struct. The
+handler then passes it to two places:
+
+- The policy engine via `policy.Subject.Attrs["license"]` — so the
+  license-allowlist evaluator can fire on ingest.
+- `models.SetLicense(versionID, license)` — so the admin / UI /
+  audit log all show the license.
+
+Today PyPI (METADATA), Maven (POM `<licenses>`), Alpine (PKGINFO
+`license`), and npm (`license`) all do this. Don't skip it for new
+formats — the supply-chain policy story is the whole reason
+pkgmirror exists.
+
+### Catch-all `*path` for hierarchical URL shapes
+
+Some formats (Maven, Container, Generic, Goproxy's `/@v/<file>`)
+have URL shapes that are too deeply hierarchical or
+filename-dependent to express with named gin params. Use a
+catch-all `*path` and parse the tail in the handler:
+
+```go
+g.GET("/*path", h.handleDownload)
+g.PUT("/*path", h.handleUpload)
+```
+
+Gin returns catch-all values with a leading `/`. Strip it before
+splitting on `/`. See `internal/packages/maven/handler.go:extractPathParameters`
+for the canonical tail-consuming parser pattern.
+
+### HEAD support
+
+Several clients use `HEAD` for cache validation distinctly from
+`GET`:
+
+- Gradle's Maven cache (every artifact fetch starts with `HEAD`)
+- OCI clients (manifest existence checks)
+- NuGet's symbol package resolution
+
+Gin doesn't auto-derive `HEAD` from `GET`. Register both handlers
+and have them share a dispatcher with a `serveContent bool`
+parameter; on `HEAD` write the same headers (`Content-Type`,
+`Content-Length`, `Last-Modified`) and return `200` without the
+body.
 
 ---
 
@@ -195,6 +429,109 @@ When in doubt, err toward more attribution rather than less.
 
 ---
 
+## Common pitfalls
+
+These have each cost real debugging time. Read this section before
+writing your handler.
+
+### Nested DB query inside an open `rows.Next()` cursor
+
+If your handler does a JOIN to get a list of files and then calls
+`Models.GetProperty(...)` inside the `rows.Next()` loop, the second
+query can race a sibling test's writer and stall on
+`SQLITE_BUSY (5)` for the full 5-second default busy timeout. This
+bit Alpine's index builder.
+
+The fix is to drain the cursor into a slice first, close it, then
+issue the per-row follow-up queries against a freed connection:
+
+```go
+rows, err := h.Models.DB.QueryContext(ctx, joinSQL, args...)
+// ...
+type pending struct { fileID int64; entry *indexEntry }
+var pendings []pending
+for rows.Next() {
+    // Scan only; do NOT issue another query here.
+    pendings = append(pendings, pending{...})
+}
+rows.Close()
+
+// Cursor is closed; per-row property fetches now safe.
+for _, p := range pendings {
+    raw, _, _ := h.Models.GetProperty(ctx, ...)
+}
+```
+
+See `internal/packages/alpine/handler.go:loadIndexEntries` for the
+canonical pattern.
+
+### `tar.Writer` body padding
+
+Go's `tar.Writer` only writes the trailing block padding for a file
+body on the next `WriteHeader` call or on `Close`. If you stream out
+a single-entry tar inside a gzip stream and finalize via
+`gzip.Writer.Close()` *without* first calling `tar.Writer.Flush()`
+or `Close()`, the resulting bytes are `512 + N` instead of
+`512 + ceil(N/512)*512` — i.e. missing padding.
+
+Real `apk` tolerates this because it reads the body by explicit byte
+count and never advances past it. But any reader walking the
+concatenated tars fails on the next entry's "header." We hit this in
+Alpine: a 4096-bit RSA signature happens to be exactly 512 bytes so
+no padding is needed; 2048-bit signatures expose the bug.
+
+Always call `tw.Flush()` after the last write if you don't call
+`tw.Close()`. See `internal/packages/alpine/index.go:writeGzipStream`.
+
+### macOS APFS `TempDir` cleanup race
+
+`t.TempDir()`'s auto-cleanup races SQLite WAL teardown on macOS APFS.
+Symptom: `cleanup: directory not empty` on fixtures that close fast.
+Every grey-box fixture has the same mitigation — explicit
+`_ = os.RemoveAll(dir)` in `t.Cleanup` *after* the `db.Close()`:
+
+```go
+t.Cleanup(func() {
+    _ = db.Close()
+    _ = os.RemoveAll(dir)  // load-bearing on macOS APFS
+})
+```
+
+It's not pretty but it works.
+
+### Out-of-order multi-file uploads
+
+For multi-file formats the upload order isn't deterministic. Maven's
+jar can arrive before its pom. Don't assume the lead/metadata file
+will be first; handle it landing later via `UpdateVersionMetadata` +
+`SetLicense`. See [Cross-cutting patterns](#out-of-order-upload-metadata-backfill).
+
+### Stress loop catches flakes a single run misses
+
+`go test ./...` once is not enough. The Alpine flakes that became
+PR comments later were both caught by:
+
+```sh
+for i in $(seq 1 15); do
+    go test ./... -count=1 -timeout 300s || break
+done
+```
+
+Heavy parallel load on a saturated CPU surfaces SQLite WAL races,
+RSA-keygen timeouts, and test-ordering bugs that a single run silently
+papers over. Make this a pre-merge habit.
+
+### Per-format `time.Sleep` in tests is almost always wrong
+
+If you're tempted to `time.Sleep` in a test, you almost certainly
+want either (a) a deterministic clock injected into the SUT, or
+(b) a polling loop with a deadline. Container's upload-sweeper tests
+use (a) — see `internal/packages/container/upload_test.go`. The
+admin audit-log test uses (b) — see
+`internal/admin/admin_test.go:TestAdmin_AuditQuery`.
+
+---
+
 ## Per-format recipes
 
 For each format we plan to support, this section captures:
@@ -288,9 +625,10 @@ Python packages. Standardized protocols, widely used.
   Upload via `twine upload --repository-url ... dist/*` or by direct
   multipart `POST` from the test process.
 
-### `maven`
+### `maven` ✓ shipped
 
-Java / Kotlin / Scala / Groovy artifacts.
+Java / Kotlin / Scala / Groovy artifacts. See
+`internal/packages/maven/` for the reference implementation.
 
 - **Spec:** [Maven repository layout](https://maven.apache.org/repository/layout.html).
   No formal central spec — the de-facto protocol is "static files at
@@ -299,16 +637,40 @@ Java / Kotlin / Scala / Groovy artifacts.
   - `forgejo/routers/api/packages/maven/maven.go` — handlers
   - `forgejo/routers/api/packages/maven/api.go` — response shapes
   - `forgejo/modules/packages/maven/metadata.go` — parses `pom.xml`
-- **Routes:** `GET/PUT /api/packages/:tenant/maven/<groupId-as-path>/<artifactId>/<version>/<filename>`
-  (e.g. `com/example/foo/1.0.0/foo-1.0.0.jar`)
+- **Routes:** `GET/HEAD/PUT /api/packages/:tenant/maven/*path` —
+  catch-all parses to `<groupId-as-path>/<artifactId>/<version>/<filename>`.
+  Don't forget `HEAD` — Gradle's cache validates with it.
 - **Parser complexity:** moderate. POM XML parsing has many optional
   fields; lean on Forgejo's parser verbatim.
+- **Patterns used:** catch-all path, `ExclusivePool` for multi-file
+  publish, on-demand `maven-metadata.xml`, synthesized checksum
+  sidecars, out-of-order metadata backfill via
+  `UpdateVersionMetadata`. See [Cross-cutting patterns](#cross-cutting-patterns).
 - **Black-box client:** `maven:3.9-eclipse-temurin-21`. Commands:
   ```sh
   # ~/.m2/settings.xml configures a server with the token as <password>
   mvn deploy -DaltDeploymentRepository=pkgmirror::default::http://pkgmirror:8080/api/packages/<tenant>/maven
   mvn dependency:get -Dartifact=com.example:foo:1.0.0 -DremoteRepositories=pkgmirror::default::http://...
   ```
+- **Client gotcha — Maven 3.8.1+ HTTP blocker:** Maven ships a
+  built-in mirror with `<mirrorOf>external:http:*</mirrorOf>` and url
+  `http://0.0.0.0/` that blocks every plain-HTTP repository. The fix
+  in `~/.m2/settings.xml` is to shadow it with a same-id mirror whose
+  `mirrorOf` matches nothing:
+  ```xml
+  <mirrors>
+    <mirror>
+      <id>maven-default-http-blocker</id>
+      <mirrorOf>dummy</mirrorOf>
+      <url>http://0.0.0.0/</url>
+      <blocked>false</blocked>
+    </mirror>
+  </mirrors>
+  ```
+  The principled fix is to terminate TLS — set
+  `PKGMIRROR_TLS_CERT`/`PKGMIRROR_TLS_KEY` or run pkgmirror behind a
+  TLS-terminating reverse proxy. The README's "Using the Maven
+  registry" section has the full settings.xml.
 
 ### `cargo`
 
@@ -368,6 +730,15 @@ Ruby gems.
   - `forgejo/modules/packages/nuget/symbol_extractor.go` — debug symbols
 - **Parser complexity:** moderate; the protocol surface is large because
   of V2 + V3.
+- **Patterns expected:** `HEAD` support (NuGet client probes for
+  symbol packages with HEAD before GET), `ExclusivePool` for the
+  `.nupkg` + `.snupkg` upload pair, on-demand V3 `index.json` (the
+  service-discovery document referencing all the V3 resource URLs by
+  type), URL rewriting in `@id` fields so clients see absolute
+  pkgmirror URLs rather than upstream ones (Forgejo's `links.go` is
+  the reference). NuGet's API key auth header
+  (`X-NuGet-ApiKey: <token>`) is format-specific; the existing auth
+  middleware accepts it alongside Bearer / Basic.
 - **Black-box client:** `mcr.microsoft.com/dotnet/sdk:8.0`. Commands:
   ```sh
   dotnet nuget add source http://pkgmirror:8080/api/packages/<tenant>/nuget/index.json -n pkgmirror -u x -p $TOKEN
@@ -488,22 +859,42 @@ Debian / Ubuntu packages.
 - **Parser complexity:** moderate to high. The on-disk index format is
   rigid; signatures (`Release.gpg`, `InRelease`) are required by `apt`
   for trusted use.
+- **Patterns expected:** catch-all path (the `dists/.../<arch>/`
+  hierarchy is too deep for named params), `ExclusivePool` for
+  multi-file uploads (`.deb` + `.dsc` + `.changes` arrive together),
+  on-demand `Packages` / `Release` generation, per-tenant GPG key
+  (`Release.gpg` + `InRelease` are signed; pattern is the same as
+  Alpine's RSA key). See [Cross-cutting patterns](#cross-cutting-patterns).
 - **Black-box client:** `debian:bookworm-slim`. Commands:
   ```sh
   echo "machine pkgmirror login x password $TOKEN" > /etc/apt/auth.conf.d/pkgmirror.conf
   echo "deb [trusted=yes] http://pkgmirror:8080/api/packages/<tenant>/debian bookworm main" > /etc/apt/sources.list.d/pkgmirror.list
   apt-get update && apt-get install -y foo
   ```
+- **Client gotcha:** `apt` will refuse an unsigned `Release` without
+  `[trusted=yes]` or an installed key. Production deployments should
+  expose `GET /api/packages/:tenant/debian/key.gpg` for clients to
+  drop in `/etc/apt/keyrings/`.
 
-### Alpine (`apk`)
+### Alpine (`apk`) ✓ shipped
 
-Alpine Linux packages.
+Alpine Linux packages. See `internal/packages/alpine/` for the
+reference implementation.
 
 - **Forgejo:** `forgejo/routers/api/packages/alpine/alpine.go`,
-  `forgejo/modules/packages/alpine/metadata.go`
+  `forgejo/modules/packages/alpine/metadata.go`,
+  `forgejo/services/packages/alpine/repository.go`
 - **Parser complexity:** moderate. APKINDEX format + signature handling.
+- **Patterns used:** per-tenant RSA key (lazily generated, stored on
+  synthetic `_alpine` package row), on-demand APKINDEX.tar.gz, file-
+  level property-based `(branch, repo, arch)` storage. The composite
+  `(branch|repo|arch|filename)` is embedded in the file name to keep
+  `UNIQUE(version_id, name)` happy without a schema change.
 - **Black-box client:** `alpine:3.20`. Commands:
   ```sh
+  curl -fsS -H "Authorization: Bearer $TOKEN" \
+      -o /etc/apk/keys/pkgmirror.rsa.pub \
+      http://pkgmirror:8080/api/packages/<tenant>/alpine/key
   echo "http://pkgmirror:8080/api/packages/<tenant>/alpine/v3.20/main" >> /etc/apk/repositories
   apk add foo
   ```
@@ -515,7 +906,13 @@ RHEL / Fedora / Rocky / Alma packages.
 - **Forgejo:** `forgejo/routers/api/packages/rpm/rpm.go`,
   `forgejo/modules/packages/rpm/metadata.go`
 - **Parser complexity:** moderate to high. RPM has a complex binary
-  metadata block.
+  metadata block (RPM tags table).
+- **Patterns expected:** catch-all path (the `<dist>/<arch>/repodata/`
+  layout), `ExclusivePool` for multi-file uploads (`.rpm` + debuginfo
+  sibling), on-demand `repomd.xml` / `primary.xml.gz` /
+  `filelists.xml.gz` generation (this index is several files referencing
+  each other by SHA256, similar to APKINDEX), per-tenant GPG key for
+  `repomd.xml.asc`. See [Cross-cutting patterns](#cross-cutting-patterns).
 - **Black-box client:** `fedora:41` or `rockylinux:9`. Commands:
   ```sh
   dnf config-manager --add-repo http://pkgmirror:8080/api/packages/<tenant>/rpm/<dist>/<arch>.repo
@@ -615,5 +1012,12 @@ RHEL / Fedora / Rocky / Alma packages.
 - [blackbox-testing.md](blackbox-testing.md) — the harness contract,
   including the copy-paste template for a new format's
   `conformance_test.go`.
+- [storage.md](storage.md) — content-addressed blob storage and the
+  staging tmpdir story. Required reading before changing anything in
+  `internal/storage/` or `internal/packages/service.go`.
+- [supply-chain.md](supply-chain.md) — policy engine architecture. Useful
+  context for the "extract license, pass to engine" step.
+- [../ATTRIBUTIONS.md](../ATTRIBUTIONS.md) — file-by-file mapping of
+  every adapted source file. New ports should add an entry here.
 - The MIT LICENSE at the repo root, and the SPDX headers on existing
   derived files — model your attribution on those.
