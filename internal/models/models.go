@@ -20,6 +20,7 @@ const (
 	TypeNpm       Type = "npm"
 	TypeRubyGems  Type = "rubygems"
 	TypeContainer Type = "container"
+	TypeGeneric   Type = "generic"
 )
 
 // PropertyRefType identifies the entity a property is attached to.
@@ -509,6 +510,42 @@ func (s *Store) ListFilesByVersion(ctx context.Context, versionID int64) ([]*Fil
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+// GetFileByVersionAndName returns the file row matching (version_id,
+// lower_name = LOWER(name)). Returns ErrFileNotExist on miss.
+func (s *Store) GetFileByVersionAndName(ctx context.Context, versionID int64, name string) (*File, error) {
+	row := s.DB.QueryRowContext(ctx,
+		`SELECT id, version_id, blob_id, name, lower_name, is_lead, created_unix
+		   FROM package_files WHERE version_id = ? AND lower_name = ?`,
+		versionID, strings.ToLower(name))
+	f := &File{}
+	var isLead int
+	if err := row.Scan(&f.ID, &f.VersionID, &f.BlobID, &f.Name, &f.LowerName, &isLead, &f.CreatedUnix); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrFileNotExist
+		}
+		return nil, err
+	}
+	f.IsLead = isLead != 0
+	return f, nil
+}
+
+// DeleteFile removes one file row by id. Does NOT touch the blob it
+// references — blob lifecycle is managed independently (content-
+// addressed; an orphan GC pass collects unreferenced blobs later).
+// Missing rows are not an error.
+func (s *Store) DeleteFile(ctx context.Context, fileID int64) error {
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM package_files WHERE id = ?`, fileID)
+	return err
+}
+
+// DeleteVersion removes a version row by id; ON DELETE CASCADE on the
+// package_files FK drops all file rows attached to it. Missing rows are
+// not an error.
+func (s *Store) DeleteVersion(ctx context.Context, versionID int64) error {
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM package_versions WHERE id = ?`, versionID)
+	return err
 }
 
 // ----- Properties -----

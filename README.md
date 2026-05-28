@@ -16,7 +16,7 @@ Roadmap (from `pkgmirror-spec.md`):
 - [x] npm (`npm`) — publish, packument, tarball download, dist-tags, scoped packages
 - [x] RubyGems (`rubygems`) — `gem push` / `gem install`, compact index, legacy specs.4.8.gz, yank
 - [x] Container / OCI (`container`) — OCI distribution v1.1: manifests, blobs (monolithic + chunked), tags, token-exchange auth dance
-- [ ] Generic
+- [x] Generic (`generic`) — PUT/GET/DELETE arbitrary blobs at `<name>/<version>/<filename>`
 - [ ] Maven
 - [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, Swift, RPM, Debian, Alpine, ALT, Arch, CRAN, Vagrant, Chef
 
@@ -245,6 +245,42 @@ Not yet implemented: cross-repo blob mount via `?mount=&from=` (falls
 through to a normal upload session, which is spec-allowed); the
 `/v2/_catalog` endpoint.
 
+## Using the generic registry
+
+The generic format is a pass-through: arbitrary blobs are stored by
+`(tenant, name, version, filename)` with no ecosystem-specific
+metadata. Useful for binary artifacts that don't fit any other format
+— build outputs, release bundles, signed installers, etc.
+
+```sh
+# Upload
+curl -fsS -X PUT \
+    -H "Authorization: Bearer $PKGMIRROR_ADMIN_TOKEN" \
+    --data-binary @./build/installer.bin \
+    http://localhost:8080/api/packages/default/generic/installer/1.0.0/installer.bin
+
+# Download
+curl -fsS -o /tmp/installer.bin \
+    -H "Authorization: Bearer $PKGMIRROR_ADMIN_TOKEN" \
+    http://localhost:8080/api/packages/default/generic/installer/1.0.0/installer.bin
+
+# Delete one file
+curl -fsS -X DELETE \
+    -H "Authorization: Bearer $PKGMIRROR_ADMIN_TOKEN" \
+    http://localhost:8080/api/packages/default/generic/installer/1.0.0/installer.bin
+
+# Delete a whole version (and every file in it)
+curl -fsS -X DELETE \
+    -H "Authorization: Bearer $PKGMIRROR_ADMIN_TOKEN" \
+    http://localhost:8080/api/packages/default/generic/installer/1.0.0
+```
+
+Duplicate filenames within the same version return 409. Many files
+are allowed per version (think `linux-amd64.tar.gz` +
+`linux-arm64.tar.gz` + `darwin-arm64.tar.gz` under the same
+`v1.0.0`). Deleting the last file in a version automatically removes
+the version row too.
+
 ## Project layout
 
 ```
@@ -259,6 +295,7 @@ internal/packages/    format-agnostic service layer (create package + file)
   npm/                npm parser + HTTP handlers
   rubygems/           RubyGems parser + Ruby Marshal encoder + HTTP handlers
   container/          OCI manifest parser + blob upload tracker + /v2/ handlers
+  generic/            Pass-through PUT/GET/DELETE handlers, no parser
 internal/server/      Gin router + middleware
 internal/ui/          Bootstrap-based HTML UI
 templates/            html/template files

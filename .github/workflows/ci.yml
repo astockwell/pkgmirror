@@ -48,6 +48,7 @@ jobs:
             python:3.12-slim
             node:22-bookworm
             ruby:3.3-slim
+            curlimages/curl:8.10.1
           )
           for img in "${images[@]}"; do
             docker pull "$img" &

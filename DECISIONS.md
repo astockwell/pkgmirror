@@ -5,6 +5,87 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-28 — Generic format (sixth format landed)
+
+**Decision:** Implement Forgejo's "generic" registry as the sixth
+package format. Mounts at `/api/packages/:tenant/generic`. Four
+endpoints, modeled on `forgejo/routers/api/packages/generic/generic.go`
+(MIT):
+
+- `PUT    /:name/:version/:filename` — upload (auth, 201 / 409 on dup)
+- `GET    /:name/:version/:filename` — download
+- `DELETE /:name/:version/:filename` — delete one file; if it was the
+  last file in the version, the version row is also removed (matches
+  Forgejo's `DeletePackageFile`)
+- `DELETE /:name/:version` — delete the whole version + every file
+
+There is no parser. The request body IS the blob; ingestion goes
+straight through `Service.CreatePackageOrAddFileToExisting` so a
+generic "package" carries many files per version (the
+`linux-amd64.tar.gz` + `linux-arm64.tar.gz` + `darwin-arm64.tar.gz`
+release-bundle shape, or Forgejo's documented use case of arbitrary
+release artifacts under a single semver).
+
+**Name and filename validation** ported verbatim from upstream:
+
+- `packageNameRegex = \A[-_+.\w]+\z`, single-char names must be
+  alphanumeric, the literal `".."` is rejected even though it would
+  match the regex (defense against path-traversal even though our
+  storage keys are sha256 hex).
+- `filenameRegex = \A[-_+=:;.()\[\]{}~!@#$%^& \w]+\z`, plus rejection
+  of `"."`, `".."`, and any value where leading/trailing whitespace
+  differs from the trimmed version.
+- Version must equal its trimmed form (no leading/trailing
+  whitespace).
+
+**Model additions:** the generic format is the first to need real
+row-level deletes, since uploads can be undone by the caller. Three
+new helpers on `models.Store`:
+
+- `GetFileByVersionAndName(versionID, name)` — single-row lookup by
+  `(version_id, lower_name)`.
+- `DeleteFile(fileID)` — removes one `package_files` row. Does not
+  touch the underlying blob (content-addressed; orphan GC is a
+  separate pass).
+- `DeleteVersion(versionID)` — removes the `package_versions` row;
+  the `ON DELETE CASCADE` on `package_files.version_id` removes all
+  attached files in one step.
+
+These are general-purpose helpers (not generic-specific). RubyGems
+yank is still `QuarantineVersion`-based — it's "soft delete with
+audit trail," which is the right semantic for `gem yank`. Generic's
+DELETE is hard delete because the caller's intent is literally
+"remove this," and there's no upstream registry equivalent to
+"hide from listings."
+
+**Black-box client:** `curlimages/curl:8.10.1`. The conformance suite
+drives a real `curl` from inside the network through:
+
+- `curl -X PUT --data-binary @file URL` — upload.
+- `curl -o downloaded URL` — download.
+- `cmp` to verify byte equality.
+- Additional from-the-test-process direct HTTP for multi-file +
+  delete-version + auth-rejected cases (curl works there too but the
+  in-process path is faster).
+
+One gotcha worth recording: `curlimages/curl` runs as a non-root user,
+so `/work` (root-owned by testcontainers' file injection) isn't
+writable for the `-o downloaded.bin` flag. The harness puts both the
+payload and the output in `/tmp` instead. Logged because every future
+test that uses this image will hit it.
+
+**What I'd revisit:**
+- Forgejo also exposes a JSON metadata view of the package at
+  `/api/v1/packages/...`. We don't have a packages-API surface yet so
+  this is out of scope.
+- The blob orphan GC is still a TODO. Generic is the first format
+  where row deletion makes orphan accumulation observable in normal
+  use; the new `storage.IterateObjects` + the model's
+  `hash_sha256 UNIQUE` lookup makes this straightforward whenever we
+  decide to implement it.
+
+---
+
 ## 2026-05-28 — Storage interface re-shaped to match Forgejo's ObjectStorage
 
 **Decision:** Replace the local 3-method `storage.Backend` interface
