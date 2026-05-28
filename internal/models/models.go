@@ -22,6 +22,7 @@ const (
 	TypeContainer Type = "container"
 	TypeGeneric   Type = "generic"
 	TypeAlpine    Type = "alpine"
+	TypeMaven     Type = "maven"
 )
 
 // PropertyRefType identifies the entity a property is attached to.
@@ -368,6 +369,25 @@ func (s *Store) SetLicense(ctx context.Context, versionID int64, license string)
 	_, err := s.DB.ExecContext(ctx,
 		`UPDATE package_versions SET license = ? WHERE id = ?`, arg, versionID)
 	return err
+}
+
+// UpdateVersionMetadata replaces the metadata_json column for one
+// version. Used by formats (Maven, in particular) where the
+// metadata-bearing file may be uploaded after the first artifact for
+// the version, so the version row exists with empty metadata at the
+// time we receive the canonical metadata source.
+func (s *Store) UpdateVersionMetadata(ctx context.Context, versionID int64, metadataJSON string) error {
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE package_versions SET metadata_json = ? WHERE id = ?`,
+		metadataJSON, versionID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrVersionNotExist
+	}
+	return nil
 }
 
 // QuarantinedView is a denormalized row joining packages + versions used

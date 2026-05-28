@@ -5,6 +5,81 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-28 — Maven format (eighth format landed)
+
+**Decision:** Implement Forgejo's Maven registry as the eighth
+package format. Mounts at `/api/packages/:tenant/maven` with a single
+catch-all `*path` route per method. Ported from
+`forgejo/routers/api/packages/maven/maven.go` (handlers) +
+`api.go` (maven-metadata.xml shape) + `modules/packages/maven/metadata.go`
+(POM parser).
+
+**Catch-all path parsing:** Maven's URL shape is
+`<groupId-with-slashes>/<artifactId>/<version>/<filename>` with a
+special case for `<groupId>/<artifactId>/maven-metadata.xml` (no
+version segment). Forgejo solves this with `extractPathParameters`
+that consumes from the tail; we ported the algorithm verbatim,
+adjusting only for gin's leading-`/` catch-all convention. The
+illegal-characters regex (`[\\/:"<>|?\*]`) is preserved from
+upstream.
+
+**Generated maven-metadata.xml, on demand:** Forgejo and pkgmirror
+both compute the per-(group,artifact) metadata XML from the live
+version list at request time. We don't cache it. Sub-millisecond
+even with hundreds of versions; "always fresh" beats any
+cache-invalidation coordination. The element order
+(`versioning>release` before `versioning>latest` before `versioning>versions`)
+matters: older Maven 3.x parsers have historically warned or rejected
+out-of-order metadata. We marshal via the same struct shape as
+forgejo to lock the order.
+
+**Checksum sidecar handling:** `.md5/.sha1/.sha256/.sha512` files
+adjacent to artifacts are NOT stored. On GET we synthesize from the
+blob's stored hash; on PUT we verify the supplied hex matches and
+return 200. Mismatch is 400 so upload corruption surfaces
+immediately. The same applies to `maven-metadata.xml.<hash>` —
+synthesized from the generated XML.
+
+**Per-package upload locking:** `mvn deploy` PUTs jar + pom +
+sources.jar + javadoc.jar + maven-metadata.xml + each one's checksum
+in rapid succession against the same `groupId:artifactId:version`.
+Without a lock the race between `CreateVersion` calls produces
+spurious `ErrDuplicatePackageVersion` errors. Forgejo serializes via
+its `sync.ExclusivePool`; we use a `sync.Map` of `*sync.Mutex` keyed
+on `<tenantID>|<groupId>:<artifactId>`. Slightly higher memory
+footprint (mutexes never freed) but simpler than maintaining a pool.
+Acceptable for our scale.
+
+**POM-after-jar metadata backfill:** Maven's upload order isn't
+deterministic — jar can arrive before pom. The lead `pom` carries
+the canonical metadata (groupId/artifactId/version, licenses,
+dependencies). On pom upload we always call
+`UpdateVersionMetadata` to overwrite whatever empty metadata the
+sibling jar's version-row creation left behind. Added
+`models.UpdateVersionMetadata` for this; was not previously needed
+by any other format.
+
+**maven-default-http-blocker workaround in the blackbox:** Maven
+3.8.1+ ships with a built-in mirror that routes every external HTTP
+repository through `http://0.0.0.0/` to enforce HTTPS-by-default.
+The blackbox test container talks to pkgmirror over the docker
+network in plain HTTP, so the blocker hits before our endpoints
+ever see the request. The settings.xml in
+`tests/blackbox/maven/conformance_test.go` shadows the default
+blocker with a same-id mirror whose `mirrorOf` matches nothing.
+Production deployments should terminate TLS in front of pkgmirror
+and avoid the override entirely.
+
+**Validated:** real `mvn deploy:deploy-file` followed by `mvn
+dependency:get` from a clean local repository round-trips through
+the registry — pom + jar + sidecar checksums + generated
+maven-metadata.xml all parse cleanly. 16 grey-box tests cover path
+parsing edge cases, checksum verification, SNAPSHOT vs release in
+the metadata's `release` element, and the
+`ignore-client-pushed-maven-metadata` quirk.
+
+---
+
 ## 2026-05-28 — Alpine (apk) format (seventh format landed)
 
 **Decision:** Implement Forgejo's Alpine registry as the seventh

@@ -160,6 +160,27 @@ adaptation.
   are modeled on upstream. We embed the `(branch|repo|arch)` composite
   key into the file name instead of adding a `composite_key` column.
 
+#### Maven
+
+- [`internal/packages/maven/parser.go`](internal/packages/maven/parser.go)
+  ← `modules/packages/maven/metadata.go` — direct transliteration of
+  the POM XML parser, including the parent-`<groupId>`-inheritance
+  fallback and the charset-aware XML decoder for ISO-8859-1 / etc.
+  POMs in the wild.
+- [`internal/packages/maven/parser_test.go`](internal/packages/maven/parser_test.go)
+  ← `modules/packages/maven/metadata_test.go` — fixtures and the
+  ISO-8859-1 encoding test ported verbatim so we exercise the same
+  edge cases.
+- [`internal/packages/maven/handler.go`](internal/packages/maven/handler.go)
+  ← `routers/api/packages/maven/maven.go`,
+  `routers/api/packages/maven/api.go` — the catch-all path parsing
+  (`<groupId-as-path>/<artifactId>/<version>/<filename>`), the
+  per-extension dispatch (pom triggers metadata extraction, checksum
+  sidecars verified-but-not-stored, jar/other as ordinary blobs), and
+  the on-demand `maven-metadata.xml` builder are modeled on upstream.
+  Per-package upload locking uses a `sync.Map` rather than forgejo's
+  `ExclusivePool` but serves the same purpose.
+
 ---
 
 ## OCI Distribution Spec

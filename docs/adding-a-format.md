@@ -588,7 +588,7 @@ RHEL / Fedora / Rocky / Alma packages.
 | swift | low | `modules/packages/swift/` | `swift:5.10` |
 | npm ✓ done | moderate | `modules/packages/npm/` | `node:22-bookworm` |
 | pypi ✓ done | moderate | `modules/packages/pypi/` | `python:3.12-slim` |
-| maven | moderate | `modules/packages/maven/` | `maven:3.9-eclipse-temurin-21` |
+| maven ✓ done | moderate | `modules/packages/maven/` | `maven:3.9-eclipse-temurin-21` |
 | composer | moderate | `modules/packages/composer/` | `composer:2` |
 | cargo | moderate | `modules/packages/cargo/` | `rust:1.81-bookworm` |
 | nuget | moderate | `modules/packages/nuget/` | `mcr.microsoft.com/dotnet/sdk:8.0` |

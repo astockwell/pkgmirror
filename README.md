@@ -15,7 +15,7 @@ there's one place to answer from.
 
 ## Status
 
-Seven formats shipped, plus a working policy + audit engine. Active
+Eight formats shipped, plus a working policy + audit engine. Active
 development; APIs surface-area-stable but no LTS guarantees yet.
 
 ### Package formats
@@ -27,7 +27,7 @@ development; APIs surface-area-stable but no LTS guarantees yet.
 - [x] Container / OCI (`container`) — OCI distribution v1.1: manifests, blobs (monolithic + chunked), tags, token-exchange auth dance
 - [x] Generic (`generic`) — PUT/GET/DELETE arbitrary blobs at `<name>/<version>/<filename>`
 - [x] Alpine (`alpine`) — `apk add` / `apk update`, signed APKINDEX.tar.gz, per-tenant RSA key
-- [ ] Maven
+- [x] Maven (`maven`) — `mvn deploy` / `mvn dependency:get`, POM metadata extraction, generated maven-metadata.xml, SHA-1/MD5/SHA-256/SHA-512 sidecar verification
 - [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, Swift, RPM, Debian, ALT, Arch, CRAN, Vagrant, Chef
 
 Every format goes through the same ingest / storage / serve pipeline, so
@@ -365,6 +365,73 @@ manual SQL operation; a `/key/rotate` endpoint is on the roadmap once
 we settle on a key-rollover UX that doesn't break already-installed
 clients.
 
+## Using the Maven registry
+
+Maven and Gradle clients treat the registry as "static files at
+predictable URLs" (the Maven 2 repository layout). pkgmirror exposes
+the per-tenant repo at `/api/packages/:tenant/maven/` and follows the
+GAV path convention: `<groupId-with-slashes>/<artifactId>/<version>/<filename>`.
+
+Configure a `~/.m2/settings.xml` with credentials and a mirror entry
+that overrides Maven 3.8.1+'s default HTTP blocker if you're running
+without TLS termination in front of pkgmirror:
+
+```xml
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+  <servers>
+    <server>
+      <id>pkgmirror</id>
+      <username>x</username>
+      <password>${env.PKGMIRROR_ADMIN_TOKEN}</password>
+    </server>
+  </servers>
+  <!-- Only needed for plain-HTTP deployments. -->
+  <mirrors>
+    <mirror>
+      <id>maven-default-http-blocker</id>
+      <mirrorOf>dummy</mirrorOf>
+      <url>http://0.0.0.0/</url>
+      <blocked>false</blocked>
+    </mirror>
+  </mirrors>
+</settings>
+```
+
+Publish a jar with `mvn deploy` or the lower-level `deploy-file` goal:
+
+```sh
+mvn deploy:deploy-file \
+    -DrepositoryId=pkgmirror \
+    -Durl=http://localhost:8080/api/packages/default/maven \
+    -DgroupId=com.example \
+    -DartifactId=foo \
+    -Dversion=1.0.0 \
+    -Dpackaging=jar \
+    -Dfile=target/foo-1.0.0.jar \
+    -DpomFile=pom.xml
+```
+
+Resolve from a Maven project by adding a `<repository>` block to your
+`pom.xml`:
+
+```xml
+<repositories>
+  <repository>
+    <id>pkgmirror</id>
+    <url>http://localhost:8080/api/packages/default/maven</url>
+  </repository>
+</repositories>
+```
+
+The registry generates `maven-metadata.xml` on demand from the live
+version list, so it always reflects the current state — no
+build-on-upload coordination. SHA-1, MD5, SHA-256, and SHA-512 sidecar
+files are synthesized from the stored blob hashes; checksum PUT
+requests are verified against the same hashes (mismatch → 400). The
+canonical license string is extracted from each artifact's POM and
+flows through the same supply-chain policy engine as every other
+format (cooldown, allowlist, quarantine).
+
 ## Project layout
 
 ```
@@ -390,6 +457,7 @@ internal/packages/    format-agnostic service layer (create package + file)
   container/          OCI manifest parser + blob upload tracker + /v2/ handlers
   generic/            Pass-through PUT/GET/DELETE handlers, no parser
   alpine/             .apk PKGINFO parser + APKINDEX.tar.gz builder + RSA signing
+  maven/              pom.xml parser + maven-metadata.xml generator + checksum sidecars
 internal/server/      Gin router + middleware
 internal/ui/          Bootstrap-based HTML UI
 templates/            html/template files

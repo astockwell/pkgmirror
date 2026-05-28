@@ -17,6 +17,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/packages/container"
 	"github.com/astockwell/pkgmirror/internal/packages/generic"
 	"github.com/astockwell/pkgmirror/internal/packages/goproxy"
+	"github.com/astockwell/pkgmirror/internal/packages/maven"
 	"github.com/astockwell/pkgmirror/internal/packages/npm"
 	"github.com/astockwell/pkgmirror/internal/packages/pypi"
 	"github.com/astockwell/pkgmirror/internal/packages/rubygems"
@@ -80,6 +81,9 @@ func New(d Deps) (*gin.Engine, error) {
 
 	alpineGroup := r.Group("/api/packages/:tenant/alpine")
 	alpine.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(alpineGroup)
+
+	mavenGroup := r.Group("/api/packages/:tenant/maven")
+	maven.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(mavenGroup)
 
 	// Container (OCI) lives at the root /v2/... per the OCI distribution
 	// spec; clients don't tolerate a path prefix. Tenant is the first
