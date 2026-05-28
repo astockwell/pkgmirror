@@ -9,13 +9,24 @@
 // addressed blob store.
 //
 // State is in-process only — restarting pkgmirror cancels all in-flight
-// uploads. This is fine for typical pushes (a `crane push` of an alpine
-// image completes in seconds); a future enhancement could persist the
-// tracker so multi-hour pushes survive restarts.
+// uploads. A future enhancement could persist the tracker so multi-hour
+// pushes survive restarts.
+//
+// Cleanup story:
+//  1. Happy / error paths in Finalize and Cancel close + remove the
+//     temp file synchronously.
+//  2. Abandoned sessions (POST without follow-up) are swept by a
+//     background goroutine that wakes every IdleSweepInterval and
+//     cancels any session whose last activity is older than IdleTimeout.
+//     Defaults: scan every 5 min, time out at 24 h, mirroring the OCI
+//     distribution spec's suggested registry behavior.
+//  3. Crash-survivor temp files (process killed mid-upload, files left
+//     on disk) are swept by SweepOrphans, called once at boot.
 
 package container
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -23,7 +34,23 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"time"
+)
+
+// Defaults for idle session cleanup. Exposed so tests can override.
+var (
+	IdleSweepInterval = 5 * time.Minute
+	IdleTimeout       = 24 * time.Hour
+)
+
+// Prefixes used by orphan-scanners. Anything matching is a known
+// pkgmirror staging file; non-matching files are left alone.
+const (
+	ociUploadPrefix      = "pkgmirror-oci-upload-"
+	hashedBufferPrefix   = "pkgmirror-upload-"
 )
 
 // ErrNoSuchUpload is returned for PATCH/PUT against an unknown upload UUID.
@@ -35,9 +62,10 @@ var ErrDigestMismatch = errors.New("container: digest mismatch")
 
 // upload is one in-progress blob upload.
 type upload struct {
-	uuid string
-	file *os.File
-	size int64
+	uuid       string
+	file       *os.File
+	size       int64
+	lastActive time.Time
 	// sha256 over the bytes written so far. We compute this incrementally
 	// so finalize doesn't have to re-read the temp file.
 	hasher interface {
@@ -54,6 +82,9 @@ type UploadTracker struct {
 	// tmpDir is where Begin() creates staging files. Empty falls back
 	// to os.TempDir() (back-compat for tests that don't plumb a dir).
 	tmpDir string
+	// now is overridable for tests of the idle sweeper. Defaults to
+	// time.Now.
+	now func() time.Time
 }
 
 // NewUploadTracker returns an empty tracker that stages files under
@@ -61,7 +92,11 @@ type UploadTracker struct {
 // callers should pass Service.TmpDir so staging lands on the same
 // filesystem as the blob store.
 func NewUploadTracker(tmpDir string) *UploadTracker {
-	return &UploadTracker{uploads: map[string]*upload{}, tmpDir: tmpDir}
+	return &UploadTracker{
+		uploads: map[string]*upload{},
+		tmpDir:  tmpDir,
+		now:     time.Now,
+	}
 }
 
 // Begin opens a new upload session and returns its UUID. Callers append
@@ -71,12 +106,12 @@ func (t *UploadTracker) Begin() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	f, err := os.CreateTemp(t.tmpDir, "pkgmirror-oci-upload-*")
+	f, err := os.CreateTemp(t.tmpDir, ociUploadPrefix+"*")
 	if err != nil {
 		return "", fmt.Errorf("create upload temp: %w", err)
 	}
 	t.mu.Lock()
-	t.uploads[id] = &upload{uuid: id, file: f, hasher: sha256.New()}
+	t.uploads[id] = &upload{uuid: id, file: f, hasher: sha256.New(), lastActive: t.now()}
 	t.mu.Unlock()
 	return id, nil
 }
@@ -98,6 +133,9 @@ func (t *UploadTracker) Append(uuid string, r io.Reader) (int64, error) {
 		return u.size, err
 	}
 	u.size += n
+	t.mu.Lock()
+	u.lastActive = t.now()
+	t.mu.Unlock()
 	return u.size, nil
 }
 
@@ -171,4 +209,95 @@ func newUUID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b[:]), nil
+}
+
+// --- idle cleanup ----------------------------------------------------------
+
+// StartIdleSweeper launches a goroutine that periodically cancels any
+// upload session whose last activity is older than IdleTimeout. The
+// sweeper exits when ctx is cancelled.
+//
+// Callers SHOULD start this when constructing the tracker in production;
+// tests typically don't bother since they explicitly Cancel() or
+// Finalize() every session they create.
+func (t *UploadTracker) StartIdleSweeper(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(IdleSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				t.sweepIdle(IdleTimeout)
+			}
+		}
+	}()
+}
+
+// sweepIdle cancels any session whose last activity is more than
+// timeout ago. Exposed for tests that want to drive the sweeper
+// deterministically.
+func (t *UploadTracker) sweepIdle(timeout time.Duration) int {
+	cutoff := t.now().Add(-timeout)
+	var stale []*upload
+	t.mu.Lock()
+	for id, u := range t.uploads {
+		if u.lastActive.Before(cutoff) {
+			stale = append(stale, u)
+			delete(t.uploads, id)
+		}
+	}
+	t.mu.Unlock()
+	for _, u := range stale {
+		_ = u.file.Close()
+		_ = os.Remove(u.file.Name())
+	}
+	return len(stale)
+}
+
+// SweepOrphans removes any leftover pkgmirror staging files in tmpDir.
+// Run once at boot: a previous process crashing mid-upload leaves
+// pkgmirror-upload-* (HashedBuffer) and pkgmirror-oci-upload-* (this
+// tracker) files behind, and there's no in-memory state pointing at
+// them anymore. We only delete files matching our own prefixes so
+// nothing else in tmpDir is at risk.
+//
+// Returns the number of files removed and the first error encountered
+// (the scan continues past per-file errors; the caller gets the best-
+// effort count and is expected to log the error rather than abort).
+func SweepOrphans(tmpDir string) (int, error) {
+	if tmpDir == "" {
+		// os.TempDir() fallback: don't sweep the system tmp because we
+		// might delete files belonging to other processes that happen to
+		// share a prefix (extremely unlikely but not worth the risk).
+		// Production callers always pass a configured TmpDir.
+		return 0, nil
+	}
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read tmpdir: %w", err)
+	}
+	var removed int
+	var firstErr error
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, ociUploadPrefix) && !strings.HasPrefix(name, hashedBufferPrefix) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(tmpDir, name)); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed++
+	}
+	return removed, firstErr
 }

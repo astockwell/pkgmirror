@@ -19,6 +19,7 @@ import (
 	pkgdb "github.com/astockwell/pkgmirror/internal/db"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
+	"github.com/astockwell/pkgmirror/internal/packages/container"
 	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/policy/cooldown"
 	"github.com/astockwell/pkgmirror/internal/policy/license"
@@ -37,6 +38,18 @@ func main() {
 	}
 	if err := os.MkdirAll(cfg.TmpDir, 0o755); err != nil {
 		log.Fatalf("create tmp dir: %v", err)
+	}
+
+	// Sweep any leftover pkgmirror staging files in TmpDir. A previous
+	// process crashing mid-upload leaves pkgmirror-upload-* (HashedBuffer)
+	// and pkgmirror-oci-upload-* (OCI tracker) files behind; nothing in
+	// the new process has a reference to them. SweepOrphans only deletes
+	// files matching our own prefixes, so anything else operators
+	// stashed in TmpDir is untouched.
+	if removed, err := container.SweepOrphans(cfg.TmpDir); err != nil {
+		log.Printf("warn: orphan sweep: %v", err)
+	} else if removed > 0 {
+		log.Printf("swept %d orphaned staging files from %s", removed, cfg.TmpDir)
 	}
 
 	dbConn, err := pkgdb.Open(cfg.DBPath)

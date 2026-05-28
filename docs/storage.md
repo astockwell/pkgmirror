@@ -66,6 +66,29 @@ is repeated in the leaf filename so you can `find data/blobs -name
 | `PKGMIRROR_BLOB_DIR` | `$DATA_DIR/blobs` | Override only the blob root. Set this to a separately-mounted volume if you want the DB on fast local disk and blobs on bulk storage. |
 | `PKGMIRROR_TMP_DIR` | `$DATA_DIR/tmp` | Staging dir for in-flight upload buffers and OCI blob uploads. Defaults under `DATA_DIR` so it shares a filesystem with `BLOB_DIR` — the final move-to-blob is then a cheap rename rather than a cross-FS copy, and uploads never touch the system `/tmp` (which is often a small tmpfs). |
 
+### `TmpDir` lifecycle
+
+Three independent paths keep `TmpDir` from ballooning over time:
+
+1. **Per-request cleanup.** Every format's upload buffer (`HashedBuffer`)
+   registers a `defer buf.Close()` immediately after creation; `Close()`
+   removes the staged file. OCI blob uploads do the same after the
+   handler drains the staged file into permanent storage.
+2. **Idle-session sweep** (OCI only). The `UploadTracker` runs a
+   background goroutine that wakes every `IdleSweepInterval` (5 min by
+   default) and cancels any session whose last activity is older than
+   `IdleTimeout` (24 h by default). Closes the "client POSTs and never
+   follows up" leak.
+3. **Startup janitor.** On boot, `container.SweepOrphans(TmpDir)` removes
+   any leftover `pkgmirror-upload-*` and `pkgmirror-oci-upload-*` files.
+   These are crash-survivors from a previous process that died mid-upload.
+   Only files matching pkgmirror's own prefixes are removed; anything
+   else operators stash in `TmpDir` is untouched.
+
+For tests, the idle sweeper is opt-in via `StartIdleSweeper(ctx)` and the
+startup janitor only runs in `cmd/pkgmirror`, so test fixtures that
+build their own staging dirs aren't affected.
+
 ---
 
 ## The blob backend interface

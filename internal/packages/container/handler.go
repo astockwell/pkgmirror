@@ -15,6 +15,7 @@ package container
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -25,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -60,15 +62,20 @@ type Handler struct {
 }
 
 // NewHandler constructs an OCI Handler. eng=nil falls back to the no-op
-// policy engine.
+// policy engine. The handler starts a background goroutine that sweeps
+// idle upload sessions every IdleSweepInterval; it runs for the lifetime
+// of the process (no shutdown ceremony — HTTP servers get SIGKILL'd and
+// the goroutine sleeps cheaply between scans).
 func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store, eng policy.Engine) *Handler {
 	if eng == nil {
 		eng = policy.NoopEngine{}
 	}
-	return &Handler{
+	h := &Handler{
 		Service: svc, Models: m, Tenants: ts, Engine: eng,
 		Uploads: NewUploadTracker(svc.TmpDir),
 	}
+	h.Uploads.StartIdleSweeper(context.Background())
+	return h
 }
 
 // Register mounts OCI routes on the root group (not under
@@ -78,15 +85,15 @@ func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store, eng pol
 // Per-route auth:
 //
 //   - GET /v2/               version probe. Bare 200 with empty JSON if
-//                            allowed by tenant visibility; 401 with the
-//                            WWW-Authenticate challenge otherwise.
+//     allowed by tenant visibility; 401 with the
+//     WWW-Authenticate challenge otherwise.
 //   - GET /v2/token          credential exchange. Accepts Basic and
-//                            mirrors the password back as the bearer
-//                            token (our existing pkm_ tokens are
-//                            already bearer-compatible).
+//     mirrors the password back as the bearer
+//     token (our existing pkm_ tokens are
+//     already bearer-compatible).
 //   - /v2/:tenant/:image/... standard tenant auth via the global
-//                            middleware. Reads require RequireRead;
-//                            writes require RequireWrite.
+//     middleware. Reads require RequireRead;
+//     writes require RequireWrite.
 //
 // Image names may contain slashes (e.g. `library/alpine`,
 // `myorg/myrepo`). gin's single-segment `:image` path parameter can't
@@ -812,8 +819,15 @@ func (h *Handler) finalizeUpload(c *gin.Context, tenant *tenants.Tenant, image, 
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "%v", err)
 		return
 	}
+	// Finalize returns the open temp file and removes the tracker entry
+	// but does NOT delete the file from disk — that's the caller's
+	// responsibility because the success path needs to read the bytes
+	// once more (storeStagedFile). Close + Remove both fire on every
+	// exit path here.
+	stagedName := file.Name()
 	defer func() {
 		_ = file.Close()
+		_ = os.Remove(stagedName)
 	}()
 
 	// Drain file into blob storage + compute the other hashes we record
