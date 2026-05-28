@@ -1,6 +1,12 @@
 // Copyright 2026 Alex Stockwell and pkgmirror contributors.
 // SPDX-License-Identifier: MIT
 //
+// The "upload session as on-disk temp file" model and the three-step
+// POST → PATCH → PUT lifecycle below are the same shape Forgejo uses
+// in services/packages/container/blob_uploader.go (MIT). The
+// in-memory tracker, idle sweeper, and orphan-on-boot sweeper
+// implementations are pkgmirror-original.
+//
 // In-memory tracker for in-progress OCI blob uploads. The OCI
 // distribution spec lets a client open an upload session
 // (POST /blobs/uploads/), stream bytes into it across one or more PATCH

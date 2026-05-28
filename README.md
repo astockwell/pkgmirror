@@ -411,3 +411,18 @@ docs/                 operator + developer documentation
   with per-ecosystem recipes
 - [DECISIONS.md](DECISIONS.md) — running log of architectural decisions
   and assumptions
+- [ATTRIBUTIONS.md](ATTRIBUTIONS.md) — file-by-file mapping of every
+  source file adapted from an upstream project (mostly Forgejo / Gitea)
+- [LICENSE](LICENSE) — MIT
+
+## Acknowledgments
+
+Most of pkgmirror's package-format support is adapted from the
+[Forgejo](https://codeberg.org/forgejo/forgejo) project and its
+ancestor [Gitea](https://github.com/go-gitea/gitea). The Forgejo
+maintainers' care in keeping the per-file MIT attribution on the
+original Gitea-origin files is what makes a project like this
+possible without a license retrofit. Thank you.
+
+See [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for the full file-by-file
+provenance.

@@ -5,13 +5,16 @@ Copyright (c) 2026 Alex Stockwell and pkgmirror contributors
 Portions of this software are derived from the Forgejo and Gitea projects:
   Copyright 2016-present The Gitea Authors
   Copyright 2022-present The Forgejo Authors
-Specifically, the Go module proxy zip parser
-(internal/packages/goproxy/parser.go) is a transliteration of
-modules/packages/goproxy/metadata.go from Forgejo, and the HTTP handler
-shape and CreatePackageAndAddFile orchestration are modeled on Forgejo's
-routers/api/packages/goproxy/goproxy.go and services/packages/packages.go.
-All such portions are themselves MIT licensed; see
-https://codeberg.org/forgejo/forgejo for the upstream.
+
+The Forgejo project as a combined work is licensed under GPL-3.0, but the
+specific source files we ported carry per-file "SPDX-License-Identifier:
+MIT" headers and "Copyright The Gitea Authors" and are MIT-licensed
+individually. Those files were imported into pkgmirror under their MIT
+terms. See https://codeberg.org/forgejo/forgejo for the upstream.
+
+A complete file-by-file mapping of every adapted source file is
+provided in ATTRIBUTIONS.md. Per-file headers also record the
+specific upstream file each port derives from.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
