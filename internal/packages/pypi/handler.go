@@ -1,0 +1,484 @@
+// Copyright 2026 Alex Stockwell and pkgmirror contributors.
+// Portions Copyright 2021-2025 The Gitea Authors.
+// SPDX-License-Identifier: MIT
+//
+// PyPI handlers, name/version validation, and PEP 503 / PEP 691 simple
+// index rendering, modeled on forgejo/routers/api/packages/pypi/pypi.go
+// (MIT). Unlike Forgejo we do PEP 503 name normalization in full
+// (re-collapse runs of [-_.] and lowercase) and we emit a real root
+// /simple/ index in addition to per-package pages.
+
+// Package pypi implements the PyPI legacy upload + simple repository
+// protocol (https://peps.python.org/pep-0503/, PEP 691, and the
+// undocumented-but-de-facto twine upload form fields).
+package pypi
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html/template"
+	"io"
+	"net/http"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/astockwell/pkgmirror/internal/auth"
+	"github.com/astockwell/pkgmirror/internal/models"
+	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
+	"github.com/astockwell/pkgmirror/internal/tenants"
+
+	"github.com/gin-gonic/gin"
+)
+
+// Property keys for per-version PyPI metadata stashed in
+// package_properties.
+const (
+	PropAuthor          = "pypi.author"
+	PropSummary         = "pypi.summary"
+	PropDescription     = "pypi.description"
+	PropLongDescription = "pypi.long_description"
+	PropProjectURL      = "pypi.project_url"
+	PropLicense         = "pypi.license"
+	PropRequiresPython  = "pypi.requires_python"
+)
+
+// Handler is the PyPI HTTP handler.
+type Handler struct {
+	Service *pkgsvc.Service
+	Models  *models.Store
+	Tenants *tenants.Store
+}
+
+// NewHandler constructs a Handler.
+func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store) *Handler {
+	return &Handler{Service: svc, Models: m, Tenants: ts}
+}
+
+// Register attaches PyPI routes to g (already scoped to
+// /api/packages/:tenant/pypi).
+//
+//	POST /                              upload (multipart legacy API)
+//	GET  /simple/                       root simple index (HTML)
+//	GET  /simple/:name/                 per-package simple index (HTML or JSON)
+//	GET  /files/:name/:version/:filename  download
+//
+// We register both the trailing-slash and no-slash variants so that pip's
+// default redirect behavior just works.
+func (h *Handler) Register(g *gin.RouterGroup) {
+	g.POST("", h.upload)
+	g.POST("/", h.upload)
+	g.GET("/simple", h.rootIndex)
+	g.GET("/simple/", h.rootIndex)
+	g.GET("/simple/:name", h.packageIndex)
+	g.GET("/simple/:name/", h.packageIndex)
+	g.GET("/files/:name/:version/:filename", h.download)
+}
+
+// tenantFromPath resolves the :tenant gin param to a tenant row.
+func (h *Handler) tenantFromPath(c *gin.Context) *tenants.Tenant {
+	name := c.Param("tenant")
+	t, err := h.Tenants.GetByName(c.Request.Context(), name)
+	if err != nil {
+		if errors.Is(err, tenants.ErrNotExist) {
+			c.String(http.StatusNotFound, "tenant %q not found", name)
+		} else {
+			c.String(http.StatusInternalServerError, "lookup tenant: %v", err)
+		}
+		return nil
+	}
+	return t
+}
+
+// --- Validation & normalization ---------------------------------------------
+
+// nameMatcher implements PEP 426 valid name syntax.
+var nameMatcher = regexp.MustCompile(`\A(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\.\-_]*[a-zA-Z0-9])\z`)
+
+// versionMatcher implements PEP 440 (appendix B).
+var versionMatcher = regexp.MustCompile(`\Av?` +
+	`(?:[0-9]+!)?` +
+	`[0-9]+(?:\.[0-9]+)*` +
+	`(?:[-_\.]?(?:a|b|c|rc|alpha|beta|pre|preview)[-_\.]?[0-9]*)?` +
+	`(?:-[0-9]+|[-_\.]?(?:post|rev|r)[-_\.]?[0-9]*)?` +
+	`(?:[-_\.]?dev[-_\.]?[0-9]*)?` +
+	`(?:\+[a-z0-9]+(?:[-_\.][a-z0-9]+)*)?` +
+	`\z`)
+
+// pep503Runs collapses any run of "-", "_", or "." into a single "-".
+var pep503Runs = regexp.MustCompile(`[-_.]+`)
+
+// NormalizeName performs full PEP 503 normalization (lowercase + collapse
+// runs of [-_.] to a single "-"). Forgejo's normalizer is partial
+// (it only replaces individual "." and "_" with "-" and does not
+// lowercase); we do the full normalization so that callers can use any
+// equivalent name and reach the same package.
+func NormalizeName(name string) string {
+	return strings.ToLower(pep503Runs.ReplaceAllString(name, "-"))
+}
+
+// isValidNameAndVersion reports whether name + version pass PEP 426 / 440.
+func isValidNameAndVersion(name, version string) bool {
+	return nameMatcher.MatchString(name) && versionMatcher.MatchString(version)
+}
+
+// --- Handlers ---------------------------------------------------------------
+
+// upload: POST / — multipart form upload (the "legacy" twine API).
+func (h *Handler) upload(c *gin.Context) {
+	tenant := h.tenantFromPath(c)
+	if tenant == nil {
+		return
+	}
+	if !auth.RequireWrite(c, tenant) {
+		return
+	}
+
+	// 32 MiB form memory cap; larger files spill to a temp file.
+	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
+		c.String(http.StatusBadRequest, "parse multipart: %v", err)
+		return
+	}
+	file, fh, err := c.Request.FormFile("content")
+	if err != nil {
+		c.String(http.StatusBadRequest, "missing 'content' file: %v", err)
+		return
+	}
+	defer file.Close()
+
+	rawName := c.Request.FormValue("name")
+	rawVersion := c.Request.FormValue("version")
+	if !isValidNameAndVersion(rawName, rawVersion) {
+		c.String(http.StatusBadRequest, "invalid PEP-426 name or PEP-440 version")
+		return
+	}
+	lookupName := NormalizeName(rawName)
+
+	buf, err := pkgsvc.NewHashedBufferFromReader(file)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "buffer upload: %v", err)
+		return
+	}
+	defer buf.Close()
+
+	// Verify the sha256_digest if the client supplied one (twine does).
+	_, _, sha256Hex, _ := buf.Sums()
+	if claimed := c.Request.FormValue("sha256_digest"); claimed != "" {
+		if !strings.EqualFold(claimed, sha256Hex) {
+			c.String(http.StatusBadRequest,
+				"sha256_digest mismatch: client=%s server=%s", claimed, sha256Hex)
+			return
+		}
+	}
+
+	homepage := extractHomepageURL(c.Request.Form["project_urls"])
+	if homepage == "" {
+		// Deprecated metadata field; honor it for older clients.
+		homepage = c.Request.FormValue("home_page")
+	}
+
+	versionProps := map[string]string{}
+	for prop, val := range map[string]string{
+		PropAuthor:          c.Request.FormValue("author"),
+		PropSummary:         c.Request.FormValue("summary"),
+		PropDescription:     c.Request.FormValue("description"),
+		PropLongDescription: c.Request.FormValue("long_description"),
+		PropProjectURL:      homepage,
+		PropLicense:         c.Request.FormValue("license"),
+		PropRequiresPython:  c.Request.FormValue("requires_python"),
+	} {
+		if val != "" {
+			versionProps[prop] = val
+		}
+	}
+
+	_, _, _, err = h.Service.CreatePackageOrAddFileToExisting(c.Request.Context(), pkgsvc.CreationInfo{
+		TenantID:          tenant.ID,
+		PackageType:       models.TypePyPI,
+		PackageName:       rawName,
+		PackageLookupName: lookupName,
+		Version:           rawVersion,
+		VersionProperties: versionProps,
+		Filename:          fh.Filename,
+		IsLead:            true,
+	}, buf)
+	if err != nil {
+		if errors.Is(err, models.ErrDuplicatePackageFile) {
+			c.String(http.StatusConflict, "file %q already uploaded for %s==%s",
+				fh.Filename, lookupName, rawVersion)
+			return
+		}
+		c.String(http.StatusInternalServerError, "ingest: %v", err)
+		return
+	}
+	c.Status(http.StatusCreated)
+}
+
+// rootIndex: GET /simple/ — PEP 503 root simple index, listing every package
+// in the tenant.
+func (h *Handler) rootIndex(c *gin.Context) {
+	tenant := h.tenantFromPath(c)
+	if tenant == nil {
+		return
+	}
+	if !auth.RequireRead(c, tenant) {
+		return
+	}
+	pkgs, err := h.Models.ListPackages(c.Request.Context(), tenant.ID, models.TypePyPI)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "%v", err)
+		return
+	}
+	sort.Slice(pkgs, func(i, j int) bool { return pkgs[i].LowerName < pkgs[j].LowerName })
+
+	rows := make([]struct{ Name, URL string }, 0, len(pkgs))
+	for _, p := range pkgs {
+		rows = append(rows, struct{ Name, URL string }{
+			Name: p.Name,
+			URL:  "./" + p.LowerName + "/",
+		})
+	}
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	if err := rootIndexTmpl.Execute(c.Writer, rows); err != nil {
+		// Headers already sent; nothing useful to do.
+		_ = err
+	}
+}
+
+// packageIndex: GET /simple/:name(/) — per-package simple index.
+// Content type negotiation: Accept: application/vnd.pypi.simple.v1+json
+// returns the PEP 691 JSON form; everything else returns HTML.
+func (h *Handler) packageIndex(c *gin.Context) {
+	tenant := h.tenantFromPath(c)
+	if tenant == nil {
+		return
+	}
+	if !auth.RequireRead(c, tenant) {
+		return
+	}
+
+	name := NormalizeName(c.Param("name"))
+	pkg, err := h.Models.GetPackageByLookup(c.Request.Context(), tenant.ID, models.TypePyPI, name)
+	if err != nil {
+		if errors.Is(err, models.ErrPackageNotExist) {
+			c.String(http.StatusNotFound, "no such package")
+			return
+		}
+		c.String(http.StatusInternalServerError, "%v", err)
+		return
+	}
+	versions, err := h.Models.ListVersions(c.Request.Context(), pkg.ID)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "%v", err)
+		return
+	}
+	sort.Slice(versions, func(i, j int) bool {
+		return strings.Compare(versions[i].Version, versions[j].Version) < 0
+	})
+
+	type fileEntry struct {
+		Filename       string
+		URL            string
+		SHA256         string
+		Size           int64
+		RequiresPython string
+	}
+	var files []fileEntry
+	for _, v := range versions {
+		fs, err := h.Models.ListFilesByVersion(c.Request.Context(), v.ID)
+		if err != nil {
+			c.String(http.StatusInternalServerError, "%v", err)
+			return
+		}
+		reqPy, _, _ := h.Models.GetProperty(c.Request.Context(),
+			models.PropertyRefVersion, v.ID, PropRequiresPython)
+		for _, f := range fs {
+			size, sha := h.fetchBlobMeta(c, f.BlobID)
+			files = append(files, fileEntry{
+				Filename:       f.Name,
+				URL:            fmt.Sprintf("../../files/%s/%s/%s", pkg.LowerName, v.Version, f.Name),
+				SHA256:         sha,
+				Size:           size,
+				RequiresPython: reqPy,
+			})
+		}
+	}
+
+	if wantsJSONSimple(c.Request) {
+		c.Header("Content-Type", "application/vnd.pypi.simple.v1+json")
+		jsonFiles := make([]jsonFile, len(files))
+		for i, f := range files {
+			jsonFiles[i] = jsonFile{
+				Filename:       f.Filename,
+				URL:            f.URL,
+				Hashes:         jsonHashes{SHA256: f.SHA256},
+				RequiresPython: f.RequiresPython,
+				Size:           f.Size,
+			}
+		}
+		verStrings := make([]string, len(versions))
+		for i, v := range versions {
+			verStrings[i] = v.Version
+		}
+		_ = json.NewEncoder(c.Writer).Encode(jsonPackage{
+			Name:     pkg.Name,
+			Meta:     jsonMeta{APIVersion: "1.0"},
+			Versions: verStrings,
+			Files:    jsonFiles,
+		})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	_ = pkgIndexTmpl.Execute(c.Writer, struct {
+		Name  string
+		Files []fileEntry
+	}{Name: pkg.Name, Files: files})
+}
+
+// download: GET /files/:name/:version/:filename
+func (h *Handler) download(c *gin.Context) {
+	tenant := h.tenantFromPath(c)
+	if tenant == nil {
+		return
+	}
+	if !auth.RequireRead(c, tenant) {
+		return
+	}
+	name := NormalizeName(c.Param("name"))
+	version := c.Param("version")
+	filename := c.Param("filename")
+
+	pkg, err := h.Models.GetPackageByLookup(c.Request.Context(), tenant.ID, models.TypePyPI, name)
+	if err != nil {
+		c.String(http.StatusNotFound, "not found")
+		return
+	}
+	ver, err := h.Models.GetVersion(c.Request.Context(), pkg.ID, version)
+	if err != nil {
+		c.String(http.StatusNotFound, "not found")
+		return
+	}
+	files, err := h.Models.ListFilesByVersion(c.Request.Context(), ver.ID)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "%v", err)
+		return
+	}
+	var match *models.File
+	for _, f := range files {
+		if strings.EqualFold(f.Name, filename) {
+			match = f
+			break
+		}
+	}
+	if match == nil {
+		c.String(http.StatusNotFound, "no such file")
+		return
+	}
+	rc, _, err := h.Service.OpenFile(c.Request.Context(), match)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "%v", err)
+		return
+	}
+	defer rc.Close()
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, match.Name))
+	_, _ = io.Copy(c.Writer, rc)
+}
+
+// --- Helpers ---------------------------------------------------------------
+
+func (h *Handler) fetchBlobMeta(c *gin.Context, blobID int64) (int64, string) {
+	row := h.Models.DB.QueryRowContext(c.Request.Context(),
+		`SELECT size, hash_sha256 FROM package_blobs WHERE id = ?`, blobID)
+	var (
+		size int64
+		sha  string
+	)
+	_ = row.Scan(&size, &sha)
+	return size, sha
+}
+
+// extractHomepageURL pulls the project_urls[] entry labeled "Homepage" (with
+// PEP-style label normalization).
+func extractHomepageURL(projectURLs []string) string {
+	for _, p := range projectURLs {
+		label, url, ok := strings.Cut(p, ",")
+		if !ok {
+			continue
+		}
+		if normalizeProjectLabel(label) == "homepage" {
+			return strings.TrimSpace(url)
+		}
+	}
+	return ""
+}
+
+// normalizeProjectLabel applies the well-known-project-urls label
+// normalization (strip punctuation and whitespace, lowercase).
+func normalizeProjectLabel(label string) string {
+	var b strings.Builder
+	for _, r := range label {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r - 'A' + 'a')
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// wantsJSONSimple checks whether the client asked for PEP 691 JSON.
+func wantsJSONSimple(r *http.Request) bool {
+	for _, h := range r.Header["Accept"] {
+		for _, part := range strings.Split(h, ",") {
+			if strings.HasPrefix(strings.TrimSpace(part), "application/vnd.pypi.simple.v1+json") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// --- JSON shapes (PEP 691) -------------------------------------------------
+
+type jsonHashes struct {
+	SHA256 string `json:"sha256"`
+}
+type jsonFile struct {
+	Filename       string     `json:"filename"`
+	URL            string     `json:"url"`
+	Hashes         jsonHashes `json:"hashes"`
+	RequiresPython string     `json:"requires-python,omitempty"`
+	Size           int64      `json:"size"`
+}
+type jsonMeta struct {
+	APIVersion string `json:"api-version"`
+}
+type jsonPackage struct {
+	Name     string     `json:"name"`
+	Meta     jsonMeta   `json:"meta"`
+	Versions []string   `json:"versions"`
+	Files    []jsonFile `json:"files"`
+}
+
+// --- Inline HTML templates -------------------------------------------------
+
+var rootIndexTmpl = template.Must(template.New("root").Parse(
+	`<!DOCTYPE html>
+<html><head><meta name="pypi:repository-version" content="1.0"><title>Simple index</title></head>
+<body>
+{{range .}}<a href="{{.URL}}">{{.Name}}</a>
+{{end}}</body></html>
+`))
+
+var pkgIndexTmpl = template.Must(template.New("pkg").Parse(
+	`<!DOCTYPE html>
+<html><head><meta name="pypi:repository-version" content="1.0"><title>Links for {{.Name}}</title></head>
+<body>
+<h1>Links for {{.Name}}</h1>
+{{range .Files}}<a href="{{.URL}}#sha256={{.SHA256}}"{{if .RequiresPython}} data-requires-python="{{.RequiresPython}}"{{end}}>{{.Filename}}</a>
+{{end}}</body></html>
+`))

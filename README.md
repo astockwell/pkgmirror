@@ -12,9 +12,9 @@ Early scaffolding. Initial format implemented: **Go module proxy** (per
 Roadmap (from `pkgmirror-spec.md`):
 
 - [x] Go module proxy (`go`)
+- [x] PyPI (`pypi`) — wheel + sdist upload, PEP 503 simple index, PEP 691 JSON
 - [ ] Generic
 - [ ] npm
-- [ ] PyPI
 - [ ] Maven
 - [ ] Container (OCI)
 - [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, RubyGems, Swift, RPM, Debian, Alpine, ALT, Arch, CRAN, Vagrant, Chef
@@ -77,6 +77,31 @@ eventually `npm`, `pip`, …) inside official docker images against a
 containerized `pkgmirror`. See
 [`docs/blackbox-testing.md`](docs/blackbox-testing.md) for the design and
 "how to add a new format" guide.
+
+## Using the PyPI registry
+
+Upload a wheel or sdist (the "legacy" multipart form API that `twine` speaks):
+
+```sh
+curl -X POST -u user:$PKGMIRROR_ADMIN_TOKEN \
+  -F ":action=file_upload" -F protocol_version=1 \
+  -F name=foo -F version=1.0.0 -F filetype=bdist_wheel -F pyversion=py3 \
+  -F metadata_version=2.1 \
+  -F content=@foo-1.0.0-py3-none-any.whl \
+  http://localhost:8080/api/packages/default/pypi/
+```
+
+Install with `pip`:
+
+```sh
+pip install \
+  --index-url http://user:$PKGMIRROR_ADMIN_TOKEN@localhost:8080/api/packages/default/pypi/simple/ \
+  --trusted-host localhost \
+  foo
+```
+
+`pip` accepts in-URL Basic-auth credentials and `.netrc` over plain HTTP
+— unlike `go`, which refuses anything but HTTPS.
 
 ## Project layout
 

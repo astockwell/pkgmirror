@@ -45,6 +45,7 @@ jobs:
           set -euxo pipefail
           images=(
             golang:1.22-bookworm
+            python:3.12-slim
           )
           for img in "${images[@]}"; do
             docker pull "$img" &

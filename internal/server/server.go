@@ -12,6 +12,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
 	"github.com/astockwell/pkgmirror/internal/packages/goproxy"
+	"github.com/astockwell/pkgmirror/internal/packages/pypi"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/ui"
 
@@ -44,6 +45,9 @@ func New(d Deps) (*gin.Engine, error) {
 	// Format-specific API groups: /api/packages/:tenant/<format>/...
 	goGroup := r.Group("/api/packages/:tenant/go")
 	goproxy.NewHandler(d.Service, d.Models, d.Tenants).Register(goGroup)
+
+	pypiGroup := r.Group("/api/packages/:tenant/pypi")
+	pypi.NewHandler(d.Service, d.Models, d.Tenants).Register(pypiGroup)
 
 	ui.New(d.Service, d.Models, d.Tenants).Register(r)
 

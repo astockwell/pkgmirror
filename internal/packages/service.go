@@ -122,11 +122,22 @@ type CreationInfo struct {
 	TenantID            int64
 	PackageType         models.Type
 	PackageName         string
+	// PackageLookupName, if non-empty, is the canonical lookup key for the
+	// package — e.g. PyPI's PEP 503-normalized name. Empty means "use
+	// strings.ToLower(PackageName)".
+	PackageLookupName   string
 	Version             string
 	VersionProperties   map[string]string
 	VersionMetadataJSON string
 	Filename            string
 	IsLead              bool
+}
+
+func (info CreationInfo) getOrCreatePackage(ctx context.Context, m *models.Store) (*models.Package, error) {
+	if info.PackageLookupName != "" {
+		return m.GetOrCreatePackageWithLookup(ctx, info.TenantID, info.PackageType, info.PackageName, info.PackageLookupName)
+	}
+	return m.GetOrCreatePackage(ctx, info.TenantID, info.PackageType, info.PackageName)
 }
 
 // CreatePackageAndAddFile creates (or fetches) the package, creates the
@@ -136,7 +147,7 @@ func (s *Service) CreatePackageAndAddFile(ctx context.Context, info CreationInfo
 	if info.TenantID == 0 {
 		return nil, nil, nil, fmt.Errorf("CreatePackageAndAddFile: TenantID is required")
 	}
-	pkg, err := s.Models.GetOrCreatePackage(ctx, info.TenantID, info.PackageType, info.PackageName)
+	pkg, err := info.getOrCreatePackage(ctx, s.Models)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create package: %w", err)
 	}
@@ -180,6 +191,77 @@ func (s *Service) CreatePackageAndAddFile(ctx context.Context, info CreationInfo
 	})
 	if err != nil {
 		return pkg, ver, nil, fmt.Errorf("create file: %w", err)
+	}
+	return pkg, ver, file, nil
+}
+
+// CreatePackageOrAddFileToExisting is like CreatePackageAndAddFile but
+// tolerates an already-existing version: instead of returning
+// ErrDuplicatePackageVersion, it attaches the new file to the existing
+// version row.
+//
+// This matches PyPI's model where a single (name, version) can have many
+// files (an sdist + one or more wheel variants). Returns
+// models.ErrDuplicatePackageFile if the exact filename already exists for
+// the version.
+func (s *Service) CreatePackageOrAddFileToExisting(ctx context.Context, info CreationInfo, buf *HashedBuffer) (*models.Package, *models.Version, *models.File, error) {
+	if info.TenantID == 0 {
+		return nil, nil, nil, fmt.Errorf("CreatePackageOrAddFileToExisting: TenantID is required")
+	}
+	pkg, err := info.getOrCreatePackage(ctx, s.Models)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create package: %w", err)
+	}
+
+	ver, err := s.Models.GetVersion(ctx, pkg.ID, info.Version)
+	if errors.Is(err, models.ErrVersionNotExist) {
+		ver, err = s.Models.CreateVersion(ctx, pkg.ID, info.Version, info.VersionMetadataJSON)
+		if err != nil && !errors.Is(err, models.ErrDuplicatePackageVersion) {
+			return pkg, nil, nil, err
+		}
+		// On lost race, re-fetch.
+		if ver == nil {
+			ver, err = s.Models.GetVersion(ctx, pkg.ID, info.Version)
+			if err != nil {
+				return pkg, nil, nil, err
+			}
+		}
+	} else if err != nil {
+		return pkg, nil, nil, err
+	}
+
+	// Set properties on every upload — for PyPI the per-version metadata
+	// (author/summary/requires-python/…) can be supplied with any file in
+	// the version; we prefer the most-recent values.
+	for k, v := range info.VersionProperties {
+		if err := s.Models.SetProperty(ctx, models.PropertyRefVersion, ver.ID, k, v); err != nil {
+			return pkg, ver, nil, fmt.Errorf("set version property %q: %w", k, err)
+		}
+	}
+
+	md5Hex, sha1Hex, sha256Hex, sha512Hex := buf.Sums()
+	if _, err := buf.Seek(0, io.SeekStart); err != nil {
+		return pkg, ver, nil, fmt.Errorf("rewind upload buffer: %w", err)
+	}
+	if err := s.Storage.Put(sha256Hex, buf); err != nil {
+		return pkg, ver, nil, fmt.Errorf("store blob: %w", err)
+	}
+	blob, err := s.Models.GetOrCreateBlob(ctx, models.Blob{
+		Size: buf.Size(), HashMD5: md5Hex, HashSHA1: sha1Hex,
+		HashSHA256: sha256Hex, HashSHA512: sha512Hex,
+	})
+	if err != nil {
+		return pkg, ver, nil, fmt.Errorf("record blob: %w", err)
+	}
+	file, err := s.Models.CreateFile(ctx, models.File{
+		VersionID: ver.ID,
+		BlobID:    blob.ID,
+		Name:      info.Filename,
+		IsLead:    info.IsLead,
+	})
+	if err != nil {
+		// Surfaces models.ErrDuplicatePackageFile unchanged.
+		return pkg, ver, nil, err
 	}
 	return pkg, ver, file, nil
 }

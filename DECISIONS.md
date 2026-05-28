@@ -5,6 +5,64 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-27 — PyPI format (second format landed)
+
+**Decision:** Implement PyPI as the second package format. Three endpoints:
+
+- `POST /api/packages/:tenant/pypi/` — multipart "legacy upload" API
+  (what `twine` and `pip upload` speak)
+- `GET  /api/packages/:tenant/pypi/simple[/]` — PEP 503 root index
+  and `GET .../simple/:name/` per-package index (HTML or PEP 691 JSON
+  via Accept negotiation)
+- `GET  /api/packages/:tenant/pypi/files/:name/:version/:filename` — download
+
+Modeled on `forgejo/routers/api/packages/pypi/pypi.go` (MIT). No parser is
+needed: package metadata arrives as multipart form fields (author, summary,
+requires_python, etc.), not embedded in the wheel/sdist file itself. We
+store per-version metadata in `package_properties` under `pypi.*` keys.
+
+**Name canonicalization:** full PEP 503 normalization
+(`re.sub(r"[-_.]+", "-", name).lower()`), stricter than Forgejo's partial
+form (Forgejo only replaces individual `_` and `.` and does not lowercase).
+To preserve the user-supplied display case (e.g. `Foo_Bar` shows as
+`Foo_Bar` in the UI/JSON while being addressable as `foo-bar` in URLs)
+we introduced `models.GetOrCreatePackageWithLookup` /
+`GetPackageByLookup` and a `PackageLookupName` field on `pkgsvc.CreationInfo`.
+The lookup key is separate from the display name and persists in the
+existing `lower_name` column — no schema change.
+
+**Multi-file versions:** PyPI's model is "one version → many files" (an
+sdist + one or more wheel variants). Added
+`pkgsvc.Service.CreatePackageOrAddFileToExisting` that, unlike
+`CreatePackageAndAddFile`, tolerates an already-existing version and
+attaches the new file to it. The existing
+`UNIQUE(version_id, lower_name)` on `package_files` still surfaces a real
+duplicate as `models.ErrDuplicatePackageFile` → 409.
+
+**Black-box conformance:** uploads a **wheel** (not an sdist) and installs
+it via `pip install --target=/work/site` in `python:3.12-slim`. Wheels are
+pre-built so they install cleanly in stripped-down Python images that lack
+`setuptools`. We construct a minimal PEP 427 universal wheel in-process
+(`buildWheel` in `tests/blackbox/pypi/wheel_test.go`) so there's no
+external fixture dependency. PEP 691 JSON conformance covered by a
+separate host-side assertion.
+
+**HTTP-vs-HTTPS:** unlike Go, pip honors in-URL Basic-auth credentials and
+`.netrc` over plain HTTP, but it does require `--trusted-host` (or
+`PIP_TRUSTED_HOST`) for non-HTTPS index URLs. The blackbox test sets
+`PIP_TRUSTED_HOST=pkgmirror` and uses the (public, by harness convention)
+default tenant, consistent with the goproxy strategy. Private-tenant +
+authenticated `pip` flows work today over plain HTTP via in-URL creds; in
+production we'd still terminate TLS in front of pkgmirror.
+
+**Validation:** unit tests cover upload (auth gate, validation, sha256
+mismatch, dup filename, multi-file version), HTML + JSON simple index,
+download roundtrip, anonymous reads on public tenants. Black-box drives
+real `pip install` + `python -c 'import foo; print(foo.greet())'` against
+`python:3.12-slim`.
+
+---
+
 ## 2026-05-27 — Multi-tenancy, users, and token auth
 
 **Decision:** Introduce three new concepts and require an authenticated

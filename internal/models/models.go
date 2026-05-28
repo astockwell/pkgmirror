@@ -15,7 +15,8 @@ import (
 type Type string
 
 const (
-	TypeGo Type = "go"
+	TypeGo   Type = "go"
+	TypePyPI Type = "pypi"
 )
 
 // PropertyRefType identifies the entity a property is attached to.
@@ -29,11 +30,12 @@ const (
 
 // Sentinel errors.
 var (
-	ErrPackageNotExist        = errors.New("package does not exist")
-	ErrVersionNotExist        = errors.New("package version does not exist")
-	ErrFileNotExist           = errors.New("package file does not exist")
-	ErrBlobNotExist           = errors.New("package blob does not exist")
+	ErrPackageNotExist         = errors.New("package does not exist")
+	ErrVersionNotExist         = errors.New("package version does not exist")
+	ErrFileNotExist            = errors.New("package file does not exist")
+	ErrBlobNotExist            = errors.New("package blob does not exist")
 	ErrDuplicatePackageVersion = errors.New("package version already exists")
+	ErrDuplicatePackageFile    = errors.New("package file already exists")
 )
 
 // Package represents a logical package (a name within a format) belonging
@@ -99,8 +101,16 @@ func New(db *sql.DB) *Store { return &Store{DB: db} }
 // GetOrCreatePackage returns the package within the given tenant matching
 // (type, name), creating it if needed.
 func (s *Store) GetOrCreatePackage(ctx context.Context, tenantID int64, t Type, name string) (*Package, error) {
-	lower := strings.ToLower(name)
-	if p, err := s.GetPackage(ctx, tenantID, t, name); err == nil {
+	return s.GetOrCreatePackageWithLookup(ctx, tenantID, t, name, strings.ToLower(name))
+}
+
+// GetOrCreatePackageWithLookup is GetOrCreatePackage with an explicit
+// lookup key. Used by formats with non-trivial name canonicalization
+// (e.g. PyPI's PEP 503 normalization), where the display name should
+// preserve the user-supplied form but lookups must match the canonical
+// key. The lookup key MUST already be lowercased / canonicalized.
+func (s *Store) GetOrCreatePackageWithLookup(ctx context.Context, tenantID int64, t Type, displayName, lookupName string) (*Package, error) {
+	if p, err := s.GetPackageByLookup(ctx, tenantID, t, lookupName); err == nil {
 		return p, nil
 	} else if !errors.Is(err, ErrPackageNotExist) {
 		return nil, err
@@ -111,23 +121,28 @@ func (s *Store) GetOrCreatePackage(ctx context.Context, tenantID int64, t Type, 
 		`INSERT INTO packages (tenant_id, type, name, lower_name, created_unix)
 		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(tenant_id, type, lower_name) DO NOTHING`,
-		tenantID, string(t), name, lower, now)
+		tenantID, string(t), displayName, lookupName, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert package: %w", err)
 	}
 	if id, _ := res.LastInsertId(); id > 0 {
-		return &Package{ID: id, TenantID: tenantID, Type: t, Name: name, LowerName: lower, CreatedUnix: now}, nil
+		return &Package{ID: id, TenantID: tenantID, Type: t, Name: displayName, LowerName: lookupName, CreatedUnix: now}, nil
 	}
-	// Conflict: another writer created it; re-read.
-	return s.GetPackage(ctx, tenantID, t, name)
+	return s.GetPackageByLookup(ctx, tenantID, t, lookupName)
 }
 
 // GetPackage looks up a package by (tenant, type, name) case-insensitively.
 func (s *Store) GetPackage(ctx context.Context, tenantID int64, t Type, name string) (*Package, error) {
+	return s.GetPackageByLookup(ctx, tenantID, t, strings.ToLower(name))
+}
+
+// GetPackageByLookup looks up a package by its canonical lookup key
+// (already lowercased / format-normalized).
+func (s *Store) GetPackageByLookup(ctx context.Context, tenantID int64, t Type, lookupName string) (*Package, error) {
 	row := s.DB.QueryRowContext(ctx,
 		`SELECT id, tenant_id, type, name, lower_name, created_unix
 		   FROM packages WHERE tenant_id = ? AND type = ? AND lower_name = ?`,
-		tenantID, string(t), strings.ToLower(name))
+		tenantID, string(t), lookupName)
 	p := &Package{}
 	var typ string
 	if err := row.Scan(&p.ID, &p.TenantID, &typ, &p.Name, &p.LowerName, &p.CreatedUnix); err != nil {
@@ -315,7 +330,8 @@ func (s *Store) GetBlobBySHA256(ctx context.Context, sha256Hex string) (*Blob, e
 
 // ----- Files -----
 
-// CreateFile inserts a file referencing a blob.
+// CreateFile inserts a file referencing a blob. Returns
+// ErrDuplicatePackageFile if (version_id, lower_name) already exists.
 func (s *Store) CreateFile(ctx context.Context, f File) (*File, error) {
 	lower := strings.ToLower(f.Name)
 	now := time.Now().Unix()
@@ -328,6 +344,9 @@ func (s *Store) CreateFile(ctx context.Context, f File) (*File, error) {
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		f.VersionID, f.BlobID, f.Name, lower, isLead, now)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrDuplicatePackageFile
+		}
 		return nil, fmt.Errorf("insert file: %w", err)
 	}
 	id, _ := res.LastInsertId()
