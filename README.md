@@ -604,6 +604,9 @@ docs/                 operator + developer documentation
   harness contract and how to add a new format's blackbox
 - [docs/adding-a-format.md](docs/adding-a-format.md) — the new-format playbook
   with per-ecosystem recipes
+- [docs/known-deviations-from-spec.md](docs/known-deviations-from-spec.md) —
+  where pkgmirror's wire behavior intentionally differs from canonical
+  format specs (e.g. how the Debian `Release.Date` field is derived)
 - [DECISIONS.md](DECISIONS.md) — running log of architectural decisions
   and assumptions
 - [ATTRIBUTIONS.md](ATTRIBUTIONS.md) — file-by-file mapping of every

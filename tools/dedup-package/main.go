@@ -8,13 +8,13 @@
 // inside a file that already has one, producing a non-compilable
 // state like:
 //
-//   // <original header>
-//   package syncutil
-//   // <duplicated header fragment>
-//   package syncutil   <-- bad
-//   import (
-//     ...
-//   )
+//	// <original header>
+//	package syncutil
+//	// <duplicated header fragment>
+//	package syncutil   <-- bad
+//	import (
+//	  ...
+//	)
 //
 // We can't pin down which tool causes it (probably a VS Code Go
 // extension misfire), so instead of chasing the trigger we guard the

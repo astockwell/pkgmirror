@@ -314,6 +314,9 @@ This pattern applies whenever an on-demand index goes to a client
 in two pieces (sig + body, hash + manifest, etc.). Forgejo can
 avoid the issue entirely by persisting the index as a file row at
 write time; we generate per-request and accept the constraint.
+The deviation that results — `Date:` reflecting data state rather
+than wall-clock — is documented in
+[known-deviations-from-spec.md](known-deviations-from-spec.md).
 
 ### License extraction → policy engine
 
@@ -1081,6 +1084,10 @@ RHEL / Fedora / Rocky / Alma packages.
   `internal/storage/` or `internal/packages/service.go`.
 - [supply-chain.md](supply-chain.md) — policy engine architecture. Useful
   context for the "extract license, pass to engine" step.
+- [known-deviations-from-spec.md](known-deviations-from-spec.md) — places
+  where pkgmirror's wire behavior intentionally differs from the
+  canonical format spec. If your new format ends up needing one, add
+  an entry there too.
 - [../ATTRIBUTIONS.md](../ATTRIBUTIONS.md) — file-by-file mapping of
   every adapted source file. New ports should add an entry here.
 - The MIT LICENSE at the repo root, and the SPDX headers on existing

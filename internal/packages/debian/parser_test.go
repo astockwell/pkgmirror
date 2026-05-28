@@ -2,9 +2,21 @@
 // Portions Copyright 2023 The Gitea Authors.
 // SPDX-License-Identifier: MIT
 //
-// Ported from forgejo/modules/packages/debian/metadata_test.go (MIT).
-// Differences from upstream:
-//   - zstd via klauspost/compress (forgejo.org/modules/zstd does not exist)
+// Direct transliteration of forgejo/modules/packages/debian/metadata.go
+// (MIT). Differences from upstream:
+//
+//   - errors via stdlib errors.New + sentinel vars (no
+//     forgejo.org/modules/util)
+//   - url validation via stdlib net/url (no
+//     forgejo.org/modules/validation)
+//   - zstd via github.com/klauspost/compress/zstd (no
+//     forgejo.org/modules/zstd)
+//
+// The on-disk .deb format (ar archive containing debian-binary,
+// control.tar[.gz|.xz|.zst], data.tar.*), the control-file scanner
+// rules (RFC 822-ish with field continuation by leading whitespace),
+// and the maintainer-address heuristic are preserved verbatim so real
+// `apt` clients have nothing to special-case about our registry.
 
 package debian
 
