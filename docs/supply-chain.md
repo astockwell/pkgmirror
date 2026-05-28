@@ -96,17 +96,49 @@ upserted into the table by `name` (so updating the file changes the
 existing row; new rules get added). **Rules absent from the file are
 not removed** — DB hotfixes survive.
 
+#### Rule fields
+
+Every entry in `rules:` accepts the same fields. Selector fields are all
+optional — leave them out to mean "any".
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `name` | yes | Unique key; re-using a name updates that row. |
+| `kind` | yes | `cooldown` \| `license_allow` (more land later). |
+| `action` | yes | `deny` \| `quarantine` \| `warn`. |
+| `config` | per-kind | Kind-specific knobs (see the per-control sections). |
+| `enabled` | no (default `true`) | Set `false` to keep the rule but disable it. |
+| **Selector — scope dimensions:** | | |
+| `tenant` | no | Tenant **name**. Empty = applies across all tenants. |
+| `format` | no | `go`, `pypi`, …  Empty = applies to all formats. |
+| `package` | no | Canonical (lowercased / PEP-503-normalized) package name. Empty = all packages. |
+| `version_pattern` | no | Glob (e.g. `2.*`, `v1.2.3`). Empty = all versions. |
+| **Tiebreak / lifecycle:** | | |
+| `priority` | no (default `100`) | Lower wins when two rules have equal specificity. |
+| `expires_at` | no | RFC-3339 timestamp; after this the rule is ignored. |
+
+The four selector fields are the cascade dimensions described in
+[Rule scoping](#rule-scoping-cascade-model) above. **More-set fields =
+more specific = wins over less-specific rules of the same kind.** You
+can express every combination you need — any subset of (tenant × format
+× package × version_pattern) — by setting or omitting each field.
+
+#### Example: a layered cooldown policy
+
 ```yaml
 # /etc/pkgmirror/policy.yaml
 rules:
 
+  # Layer 1 — broadest. Applies to every tenant + every format.
+  # Specificity: 0.
   - name: org-default-cooldown
     kind: cooldown
-    enabled: true
-    action: quarantine        # on ingest: store-but-hide; on read: filtered
+    action: quarantine
     config:
       min_age_days: 7
 
+  # Layer 2 — tenant-scoped. Applies to acme-prod for every format.
+  # Specificity: 4 (tenant).
   - name: prod-tenant-strict-cooldown
     kind: cooldown
     tenant: acme-prod
@@ -114,23 +146,79 @@ rules:
     config:
       min_age_days: 21
 
+  # Layer 3 — tenant + format. Applies to acme-prod's pypi packages only.
+  # Specificity: 6 (tenant + format).
+  - name: prod-tenant-pypi-stricter
+    kind: cooldown
+    tenant: acme-prod
+    format: pypi
+    action: quarantine
+    config:
+      min_age_days: 30
+
+  # Layer 4 — tenant + format + package. The fast-path exemption for
+  # `requests` only inside acme-prod's pypi mirror.
+  # Specificity: 14 (tenant + format + package).
   - name: prod-tenant-pypi-requests-fastpath
     kind: cooldown
     tenant: acme-prod
     format: pypi
     package: requests
-    priority: 50              # lower wins on tiebreak
     action: warn
     config:
-      min_age_days: 0         # exemption
+      min_age_days: 0          # explicit "no cooldown"
+
+  # Layer 5 — tenant + format + package + version pattern. Block one
+  # specific bad release while everything else flows normally.
+  # Specificity: 30 (all four selectors).
+  - name: block-cve-version
+    kind: block            # NOTE: blocklist is not yet implemented;
+    tenant: acme-prod      #       shown for shape only.
+    format: pypi
+    package: ua-parser-js
+    version_pattern: 0.7.29
+    action: deny
+    config: {}
+
+  # ---- A different kind: license allowlist ----
 
   - name: org-license-allowlist
     kind: license_allow
-    action: deny
+    action: deny             # off-list licenses are refused at ingest
     config:
       allow: [MIT, Apache-2.0, BSD-3-Clause, ISC, MPL-2.0, BSD-2-Clause, Unlicense]
       on_unknown: warn
+
+  # Same kind, narrower scope: a legal-approved exception for one
+  # internal package that's GPL.
+  - name: acme-internal-gpl-exception
+    kind: license_allow
+    tenant: acme-prod
+    format: pypi
+    package: acme-internal-gpl-thing
+    action: deny
+    config:
+      allow: [GPL-3.0]
 ```
+
+#### Worked example: which rule applies?
+
+Take the subject `acme-prod / pypi / requests / 2.32.0`.
+
+For `kind: cooldown`, four rules match: `org-default-cooldown`,
+`prod-tenant-strict-cooldown`, `prod-tenant-pypi-stricter`, and
+`prod-tenant-pypi-requests-fastpath`. The engine sorts by
+`(specificity DESC, priority ASC)` and the cooldown evaluator applies
+the first one: **`prod-tenant-pypi-requests-fastpath`** (specificity
+14, `min_age_days: 0` → Allow).
+
+Now take `acme-prod / pypi / foo / 1.0.0`. The same first three rules
+match; the fast-path rule does not (its `package: requests` filter
+excludes it). The winner is now **`prod-tenant-pypi-stricter`**
+(specificity 6, 30-day cooldown).
+
+This is the entirety of the cascade model — no special-case overrides,
+no implicit precedence rules, just data.
 
 After editing, restart pkgmirror to re-sync (a `SIGHUP`-triggered reload
 is on the roadmap). The in-memory cache also refreshes from the DB every
