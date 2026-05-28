@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -87,29 +88,150 @@ func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store, eng pol
 //                            middleware. Reads require RequireRead;
 //                            writes require RequireWrite.
 //
-// :image is a single path segment in this MVP. Multi-segment names
-// (e.g. `myorg/myimage`) are a follow-up that would need a wildcard
-// route + regex dispatch like Forgejo's.
+// Image names may contain slashes (e.g. `library/alpine`,
+// `myorg/myrepo`). gin's single-segment `:image` path parameter can't
+// express that, and gin's router won't let us mix `:image` with a
+// wildcard `*action` at the same path level, so we register one
+// catch-all per HTTP method and dispatch via regex inside. This
+// mirrors what Forgejo does in
+// `forgejo/routers/api/packages/api.go` (search for
+// `blobsUploadsPattern` / `blobsPattern` / `manifestsPattern`).
 func (h *Handler) Register(r gin.IRouter) {
-	v2 := r.Group("/v2")
-	v2.GET("", h.versionCheck)
-	v2.GET("/", h.versionCheck)
-	v2.GET("/token", h.token)
+	for _, m := range []struct {
+		method string
+		fn     gin.HandlerFunc
+	}{
+		{http.MethodGet, h.dispatch(http.MethodGet)},
+		{http.MethodHead, h.dispatch(http.MethodHead)},
+		{http.MethodPost, h.dispatch(http.MethodPost)},
+		{http.MethodPut, h.dispatch(http.MethodPut)},
+		{http.MethodPatch, h.dispatch(http.MethodPatch)},
+		{http.MethodDelete, h.dispatch(http.MethodDelete)},
+	} {
+		r.Handle(m.method, "/v2/*action", m.fn)
+	}
+}
 
-	// All :tenant/:image scoped routes.
-	scoped := v2.Group("/:tenant/:image")
-	scoped.GET("/tags/list", h.listTags)
-	scoped.HEAD("/manifests/:reference", h.headManifest)
-	scoped.GET("/manifests/:reference", h.getManifest)
-	scoped.PUT("/manifests/:reference", h.putManifest)
-	scoped.DELETE("/manifests/:reference", h.deleteManifest)
-	scoped.HEAD("/blobs/:digest", h.headBlob)
-	scoped.GET("/blobs/:digest", h.getBlob)
-	scoped.POST("/blobs/uploads/", h.startUpload)
-	scoped.POST("/blobs/uploads", h.startUpload)
-	scoped.PATCH("/blobs/uploads/:uuid", h.patchUpload)
-	scoped.PUT("/blobs/uploads/:uuid", h.putUpload)
-	scoped.DELETE("/blobs/uploads/:uuid", h.cancelUpload)
+// dispatch routes a single HTTP method's /v2/* requests to the right
+// handler based on the path tail. Static paths (empty, "/token") win
+// over the regex-matched tenant/image patterns.
+func (h *Handler) dispatch(method string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// gin's *action includes the leading slash and may be empty for
+		// /v2 / /v2/ exact matches; strip the slash for cleaner matching.
+		action := strings.TrimPrefix(c.Param("action"), "/")
+
+		// Static endpoints first.
+		switch action {
+		case "", "/":
+			if method == http.MethodGet {
+				h.versionCheck(c)
+				return
+			}
+			c.Status(http.StatusMethodNotAllowed)
+			return
+		case "token":
+			if method == http.MethodGet {
+				h.token(c)
+				return
+			}
+			c.Status(http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Pattern matches — ordered from most-specific to least.
+		// The patterns extract (tenant, image, ref|digest|uuid) where
+		// `image` is greedy (`.+`) so it can absorb slashes.
+		switch method {
+		case http.MethodGet, http.MethodHead:
+			if m := tagsListRE.FindStringSubmatch(action); m != nil && method == http.MethodGet {
+				setParams(c, "tenant", m[1], "image", m[2])
+				h.listTags(c)
+				return
+			}
+			if m := manifestRE.FindStringSubmatch(action); m != nil {
+				setParams(c, "tenant", m[1], "image", m[2], "reference", m[3])
+				if method == http.MethodHead {
+					h.headManifest(c)
+				} else {
+					h.getManifest(c)
+				}
+				return
+			}
+			if m := blobRE.FindStringSubmatch(action); m != nil {
+				setParams(c, "tenant", m[1], "image", m[2], "digest", m[3])
+				if method == http.MethodHead {
+					h.headBlob(c)
+				} else {
+					h.getBlob(c)
+				}
+				return
+			}
+		case http.MethodPost:
+			if m := blobUploadsRootRE.FindStringSubmatch(action); m != nil {
+				setParams(c, "tenant", m[1], "image", m[2])
+				h.startUpload(c)
+				return
+			}
+		case http.MethodPut:
+			if m := blobUploadUUIDRE.FindStringSubmatch(action); m != nil {
+				setParams(c, "tenant", m[1], "image", m[2], "uuid", m[3])
+				h.putUpload(c)
+				return
+			}
+			if m := manifestRE.FindStringSubmatch(action); m != nil {
+				setParams(c, "tenant", m[1], "image", m[2], "reference", m[3])
+				h.putManifest(c)
+				return
+			}
+		case http.MethodPatch:
+			if m := blobUploadUUIDRE.FindStringSubmatch(action); m != nil {
+				setParams(c, "tenant", m[1], "image", m[2], "uuid", m[3])
+				h.patchUpload(c)
+				return
+			}
+		case http.MethodDelete:
+			if m := blobUploadUUIDRE.FindStringSubmatch(action); m != nil {
+				setParams(c, "tenant", m[1], "image", m[2], "uuid", m[3])
+				h.cancelUpload(c)
+				return
+			}
+			if m := manifestRE.FindStringSubmatch(action); m != nil {
+				setParams(c, "tenant", m[1], "image", m[2], "reference", m[3])
+				h.deleteManifest(c)
+				return
+			}
+			if m := blobRE.FindStringSubmatch(action); m != nil {
+				setParams(c, "tenant", m[1], "image", m[2], "digest", m[3])
+				// We don't currently expose a deleteBlob handler;
+				// 405 is the OCI-conformant response.
+				c.Status(http.StatusMethodNotAllowed)
+				return
+			}
+		}
+
+		// Nothing matched — emit the OCI-flavored 404.
+		writeError(c, http.StatusNotFound, "NAME_UNKNOWN", "route %q not recognized", action)
+	}
+}
+
+// Patterns for parsing the catch-all action tail. Image (`.+`) is
+// greedy by design so it absorbs interior slashes; the closing literal
+// (`/manifests/`, `/blobs/`, `/tags/list`) is what terminates it.
+var (
+	tagsListRE        = regexp.MustCompile(`^([^/]+)/(.+)/tags/list$`)
+	manifestRE        = regexp.MustCompile(`^([^/]+)/(.+)/manifests/([^/]+)$`)
+	blobRE            = regexp.MustCompile(`^([^/]+)/(.+)/blobs/([^/]+)$`)
+	blobUploadsRootRE = regexp.MustCompile(`^([^/]+)/(.+)/blobs/uploads/?$`)
+	blobUploadUUIDRE  = regexp.MustCompile(`^([^/]+)/(.+)/blobs/uploads/([a-zA-Z0-9._=-]+)$`)
+)
+
+// setParams appends key/value pairs to c.Params so the existing
+// handlers' `c.Param("tenant")` etc. continue to work unchanged.
+func setParams(c *gin.Context, kv ...string) {
+	for i := 0; i+1 < len(kv); i += 2 {
+		c.Params = append(c.Params, gin.Param{Key: kv[i], Value: kv[i+1]})
+	}
 }
 
 // --- /v2/ root + token --------------------------------------------------------

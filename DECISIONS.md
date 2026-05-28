@@ -5,6 +5,66 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-28 — Container/OCI: multi-segment image names
+
+**Decision:** Replace the single-segment `:image` routes with per-method
+catch-all routes (`/v2/*action`) plus a regex-based dispatcher. This is
+the same trick Forgejo uses (`forgejo/routers/api/packages/api.go`:
+`blobsUploadsPattern`, `blobsPattern`, `manifestsPattern`) and the only
+straightforward way to make image references like
+`localhost:8080/default/myorg/team/svc:v1` work.
+
+**Why a refactor was unavoidable:** gin's underlying router
+(httprouter) does not allow mixing a static path parameter (`:image`)
+with a wildcard (`*action`) at the same path position. We tried; it
+panics on Register. The choice is therefore binary: keep the
+single-segment routes and lose multi-segment names, or drop the
+single-segment routes and dispatch everything inside one catch-all per
+method. Forgejo took the same route under chi.
+
+**Dispatcher design:**
+- One `gin.HandlerFunc` per HTTP method, all registered against
+  `/v2/*action`. The shared `dispatch(method)` closure inspects
+  `c.Param("action")` (which gin populates with everything after
+  `/v2`, including the leading `/`).
+- Static cases first: empty tail → `/v2/` version probe; tail
+  `"token"` → token-exchange endpoint.
+- Pattern matches by method: `tagsListRE`, `manifestRE`, `blobRE`,
+  `blobUploadsRootRE`, `blobUploadUUIDRE`. Each pattern is anchored at
+  both ends and uses `(.+)` for the image name so it greedily absorbs
+  interior slashes; the terminating literal (`/manifests/`,
+  `/blobs/`, `/tags/list`) is what stops it.
+- A small `setParams(c, k, v, ...)` helper appends to `c.Params` so
+  the existing handlers' `c.Param("tenant")` / `c.Param("image")` /
+  `c.Param("reference")` / etc. continue to work unchanged. No
+  handler signatures needed touching.
+
+**Greedy matching is correct:** for a request like
+`/v2/default/myorg/team/svc/manifests/v1`, `manifestRE`'s
+`^([^/]+)/(.+)/manifests/([^/]+)$` greedily consumes
+`myorg/team/svc` as the image so the final `/manifests/v1` matches.
+For `/v2/default/img/manifests/sha256:abc...`, the `[^/]+` reference
+group correctly accepts digests (no slashes in `sha256:<hex>`).
+
+**Edge case: image names that contain literal `"manifests"` or
+`"blobs"` segments** (rare but valid) parse to the leftmost split.
+E.g., `default/foo/blobs/manifests/v1` yields image=`foo/blobs`,
+reference=`v1`. This matches Forgejo's behavior.
+
+**Tests:** Four new grey-box tests against the http handler
+(`TestOCI_MultiSegment_*`) and one new black-box test
+(`TestOCIConformance_MultiSegmentImageName`) that drives
+go-containerregistry against a three-segment image name and verifies
+push + pull + tags/list all round-trip. Existing single-segment tests
+continue to pass unchanged.
+
+**What I'd revisit:** the regex constants are package-level and
+compiled at init. Fine for now; if we ever add more endpoints we should
+consolidate to a routing table-of-(method, pattern, handler) so the
+dispatch function stays linear.
+
+---
+
 ## 2026-05-27 — Container / OCI format (fifth format landed)
 
 **Decision:** Implement OCI distribution v1.1 as the fifth format. This
@@ -73,9 +133,10 @@ one-shot upload, skipping the PATCH/PUT round trip. We support it
 because some clients (notably `oras`) use it by default.
 
 **MVP scope limits (documented in handler.go and README):**
-- Image names are a single path segment. `myorg/myimage`-style
-  multi-segment names need Gin wildcard routing + regex dispatch
-  similar to Forgejo's; deferred.
+- ~~Image names are a single path segment.~~ Multi-segment image names
+  (e.g. `myorg/myimage`, `library/alpine`) now supported via per-method
+  catch-all routes + regex dispatch — mirrors Forgejo's approach in
+  `forgejo/routers/api/packages/api.go`. See 2026-05-28 entry below.
 - No cross-repo blob mount via `?mount=<digest>&from=<other-repo>`.
   Clients that try this fall through to a normal upload session, which
   is spec-allowed.

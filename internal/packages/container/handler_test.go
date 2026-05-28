@@ -387,6 +387,154 @@ func TestOCI_InvalidDigestRejected(t *testing.T) {
 	}
 }
 
+// --- multi-segment image name coverage --------------------------------------
+
+// TestOCI_MultiSegment_Blob_RoundTrip pushes and pulls a blob through a
+// repo whose image name has an interior slash ("myorg/widget"). This is
+// the canonical multi-segment shape used by every real registry namespace
+// (`library/alpine`, `cgr.dev/chainguard/static`, etc.).
+func TestOCI_MultiSegment_Blob_RoundTrip(t *testing.T) {
+	f := newFixture(t, tenants.VisibilityPrivate)
+	digest := f.uploadBlob(t, "myorg/widget", []byte("multi-segment blob"))
+
+	path := "/v2/" + f.tenant + "/myorg/widget/blobs/" + digest
+	resp, _ := f.do(t, http.MethodHead, path, "", nil, true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD: %d", resp.StatusCode)
+	}
+	resp, body := f.do(t, http.MethodGet, path, "", nil, true)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, []byte("multi-segment blob")) {
+		t.Fatalf("GET: %d, body=%q", resp.StatusCode, body)
+	}
+}
+
+// TestOCI_MultiSegment_Manifest_PutGet covers the full
+// manifest-by-tag and manifest-by-digest paths through a three-segment
+// image name ("acme/team/svc"). Exercises the .+ greediness in
+// manifestRE — interior slashes must end up in the image name, not
+// confuse the regex into treating an interior segment as the reference.
+func TestOCI_MultiSegment_Manifest_PutGet(t *testing.T) {
+	f := newFixture(t, tenants.VisibilityPrivate)
+	configBytes := []byte(`{"architecture":"amd64","os":"linux"}`)
+	layerBytes := []byte("layer for multi-segment")
+	configDigest := f.uploadBlob(t, "acme/team/svc", configBytes)
+	layerDigest := f.uploadBlob(t, "acme/team/svc", layerBytes)
+
+	manifest := map[string]any{
+		"schemaVersion": 2,
+		"mediaType":     ocipkg.MediaTypeOCIManifest,
+		"config": map[string]any{
+			"mediaType": "application/vnd.oci.image.config.v1+json",
+			"size":      len(configBytes),
+			"digest":    configDigest,
+		},
+		"layers": []map[string]any{{
+			"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+			"size":      len(layerBytes),
+			"digest":    layerDigest,
+		}},
+	}
+	body := mustJSON(t, manifest)
+	resp, out := f.do(t, http.MethodPut,
+		"/v2/"+f.tenant+"/acme/team/svc/manifests/v1",
+		ocipkg.MediaTypeOCIManifest, body, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT manifest: %d %s", resp.StatusCode, out)
+	}
+	manifestDigest := resp.Header.Get("Docker-Content-Digest")
+	if manifestDigest == "" {
+		t.Fatalf("missing Docker-Content-Digest")
+	}
+	// Location header should re-encode the multi-segment image path.
+	wantLoc := "/v2/" + f.tenant + "/acme/team/svc/manifests/" + manifestDigest
+	if got := resp.Header.Get("Location"); got != wantLoc {
+		t.Fatalf("Location: got %q want %q", got, wantLoc)
+	}
+
+	// Tag GET.
+	resp, out = f.do(t, http.MethodGet,
+		"/v2/"+f.tenant+"/acme/team/svc/manifests/v1", "", nil, true)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(out, body) {
+		t.Fatalf("GET by tag: %d body-len=%d", resp.StatusCode, len(out))
+	}
+
+	// Digest GET.
+	resp, out = f.do(t, http.MethodGet,
+		"/v2/"+f.tenant+"/acme/team/svc/manifests/"+manifestDigest, "", nil, true)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(out, body) {
+		t.Fatalf("GET by digest: %d", resp.StatusCode)
+	}
+}
+
+// TestOCI_MultiSegment_TagsList exercises /tags/list against a
+// multi-segment image so the regex correctly stops at /tags/list rather
+// than treating "tags" or "list" as a path component.
+func TestOCI_MultiSegment_TagsList(t *testing.T) {
+	f := newFixture(t, tenants.VisibilityPrivate)
+	configBytes := []byte(`{"architecture":"amd64","os":"linux"}`)
+	configDigest := f.uploadBlob(t, "ns/pkg", configBytes)
+	for _, tag := range []string{"v1", "v2"} {
+		manifest := map[string]any{
+			"schemaVersion": 2,
+			"mediaType":     ocipkg.MediaTypeOCIManifest,
+			"config": map[string]any{
+				"mediaType": "application/vnd.oci.image.config.v1+json",
+				"size":      len(configBytes),
+				"digest":    configDigest,
+			},
+			"layers": []map[string]any{},
+		}
+		resp, _ := f.do(t, http.MethodPut,
+			"/v2/"+f.tenant+"/ns/pkg/manifests/"+tag,
+			ocipkg.MediaTypeOCIManifest, mustJSON(t, manifest), true)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("PUT %s: %d", tag, resp.StatusCode)
+		}
+	}
+	resp, body := f.do(t, http.MethodGet,
+		"/v2/"+f.tenant+"/ns/pkg/tags/list", "", nil, true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("tags/list: %d", resp.StatusCode)
+	}
+	var got struct {
+		Name string   `json:"name"`
+		Tags []string `json:"tags"`
+	}
+	_ = json.Unmarshal(body, &got)
+	if got.Name != "ns/pkg" {
+		t.Fatalf("name: got %q want %q", got.Name, "ns/pkg")
+	}
+	if len(got.Tags) != 2 {
+		t.Fatalf("tags: %+v", got.Tags)
+	}
+}
+
+// TestOCI_MultiSegment_BlobUploadLocation verifies that the Location
+// header for a multi-segment image preserves the full image path so the
+// client's follow-up PUT lands on the right repo.
+func TestOCI_MultiSegment_BlobUploadLocation(t *testing.T) {
+	f := newFixture(t, tenants.VisibilityPrivate)
+	base := "/v2/" + f.tenant + "/team/proj/repo"
+	resp, _ := f.do(t, http.MethodPost, base+"/blobs/uploads/", "", nil, true)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("start: %d", resp.StatusCode)
+	}
+	loc := resp.Header.Get("Location")
+	wantPrefix := base + "/blobs/uploads/"
+	if !strings.HasPrefix(loc, wantPrefix) {
+		t.Fatalf("Location %q missing prefix %q", loc, wantPrefix)
+	}
+	// Finalize through the returned Location.
+	content := []byte("content for team/proj/repo")
+	sum := sha256.Sum256(content)
+	digest := "sha256:" + hex.EncodeToString(sum[:])
+	resp, body := f.do(t, http.MethodPut, loc+"?digest="+digest,
+		"application/octet-stream", content, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("finalize: %d %s", resp.StatusCode, body)
+	}
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)

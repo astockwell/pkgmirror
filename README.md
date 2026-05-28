@@ -234,8 +234,16 @@ from Basic back as the bearer value, so the same `pkm_` token works
 throughout. Anonymous reads on public tenants get a placeholder bearer
 (`anonymous`) that the auth middleware silently treats as no-identity.
 
-Limitations of the MVP: image names are single-segment only (no
-`myorg/myimage`), no cross-repo blob mount, no `/v2/_catalog`.
+Image names may contain interior slashes (`docker push
+localhost:8080/default/myorg/team/svc:v1`). Internally the routes are
+registered as catch-alls per HTTP method and dispatched via regex, the
+same approach Forgejo takes; the dispatcher greedily matches the
+image name up to the trailing `/manifests/`, `/blobs/`, or
+`/tags/list` delimiter.
+
+Not yet implemented: cross-repo blob mount via `?mount=&from=` (falls
+through to a normal upload session, which is spec-allowed); the
+`/v2/_catalog` endpoint.
 
 ## Project layout
 

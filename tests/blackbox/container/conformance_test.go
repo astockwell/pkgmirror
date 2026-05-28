@@ -191,3 +191,53 @@ func TestOCIConformance_EmptyImagePush(t *testing.T) {
 		t.Fatalf("read empty.Image: %v", err)
 	}
 }
+
+// TestOCIConformance_MultiSegmentImageName drives a real OCI client
+// through push + pull + tag-list against an image whose name contains
+// interior slashes ("myorg/team/svc"). This is the wire-format
+// equivalent of pushing to docker.io/library/alpine — the namespace
+// shape every production registry uses.
+func TestOCIConformance_MultiSegmentImageName(t *testing.T) {
+	ctx := context.Background()
+	stack := harness.Start(ctx, t)
+	host := registryHost(t, stack)
+	auth := &authenticator{token: stack.AdminToken}
+
+	img, err := random.Image(128, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	wantDigest, _ := img.Digest()
+
+	ref, err := name.ParseReference(host + "/" + harness.DefaultTenant + "/myorg/team/svc:v1")
+	if err != nil {
+		t.Fatalf("parse ref: %v", err)
+	}
+	if err := remote.Write(ref, img,
+		remote.WithAuth(auth),
+		remote.WithContext(ctx)); err != nil {
+		t.Fatalf("remote.Write: %v", err)
+	}
+	pulled, err := remote.Image(ref,
+		remote.WithAuth(auth),
+		remote.WithContext(ctx))
+	if err != nil {
+		t.Fatalf("remote.Image: %v", err)
+	}
+	gotDigest, _ := pulled.Digest()
+	if gotDigest != wantDigest {
+		t.Fatalf("digest drift: pushed %s pulled %s", wantDigest, gotDigest)
+	}
+
+	// tags/list against the multi-segment repo.
+	listRef, _ := name.NewRepository(host + "/" + harness.DefaultTenant + "/myorg/team/svc")
+	tags, err := remote.List(listRef,
+		remote.WithAuth(auth),
+		remote.WithContext(ctx))
+	if err != nil {
+		t.Fatalf("remote.List: %v", err)
+	}
+	if len(tags) != 1 || tags[0] != "v1" {
+		t.Fatalf("tags: %v", tags)
+	}
+}
