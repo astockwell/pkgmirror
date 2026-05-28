@@ -5,6 +5,77 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-28 — Debian format (ninth format landed)
+
+**Decision:** Implement Forgejo's Debian (apt) registry as the ninth
+package format. Mounts at `/api/packages/:tenant/debian` with a
+mix of named-param routes (the `/dists/...` index family) and
+catch-all-style coordinates (the `/pool/.../upload` write path).
+Ported from `forgejo/routers/api/packages/debian/debian.go`,
+`forgejo/modules/packages/debian/metadata.go`, and
+`forgejo/services/packages/debian/repository.go`.
+
+**On-demand index generation + load-bearing `Date:` derivation.** Same
+on-demand-not-cached choice as Maven and Alpine. But Debian is the
+first format where index generation involves *both* signing AND a
+client that fetches the signed-thing and the signature in
+*separate* requests. The detached `Release.gpg` is computed over
+the exact bytes of `Release`. If two GET requests for `/Release`
+and `/Release.gpg` produce Release bytes with different `Date:`
+fields (because `time.Now()` ticks between them), the signature
+no longer validates against the second Release body — apt fails
+with "GPG error".
+
+The fix is to make `Release` deterministic from the data state.
+We derive `Date:` from `max(file.created_unix)` across the
+distribution. The byte sequence is now identical across requests
+without any caching coordination. This is a new cross-cutting
+pattern future signed-on-demand formats (RPM's `repomd.xml.asc`,
+NuGet symbol packages with signature, etc.) will need too —
+captured in docs/adding-a-format.md as the "Stable bytes for
+signed-on-demand content" pattern.
+
+**Per-tenant OpenPGP keypair on `_debian`.** Matches the Alpine
+RSA-key pattern: a synthetic `_debian` package row scoped to the
+tenant stores the armored private + public PEM as properties.
+First-time generation is gated behind `internal/syncutil.ExclusivePool`
+keyed on `<tenant>|debian-key` to avoid the
+UNIQUE-property-constraint races Forgejo had to add `RetryTx` for.
+We don't need the retry because the lock prevents the race entirely.
+
+**Composite-key encoding follows Alpine.** Each .deb file row's
+name is `<dist>|<comp>|<arch>|<basename>.deb`. The Packages index
+emission strips the composite prefix and emits the basename in the
+`Filename:` field that apt actually requests. Avoids the
+`composite_key` schema column Forgejo adds.
+
+**Out of scope:** by-hash lookups (`/dists/.../by-hash/<algo>/<hash>`)
+are advertised in `Release: Acquire-By-Hash: yes` but the routes
+aren't implemented; apt falls back to direct path lookups when
+those 404. Source packages (`.dsc` + `.diff.gz` + `.tar.gz`) and
+the `Sources` index are also unimplemented — most operators only
+need binary `.deb` distribution. Both are purely additive to the
+current shape.
+
+**Validated:** `apt update` succeeds against our InRelease + Release.gpg
+signature pair (the load-bearing assertion); `apt-cache show
+fixture-pkg` parses the on-demand Packages index and surfaces our
+metadata. We deliberately don't drive `apt install` because that
+requires a fully-extractable `data.tar` inside the `.deb` (rootfs
+payload, scripts, dependency closure) — well beyond what we need
+to prove the registry format.
+
+**Notable scope decisions worth revisiting:**
+- The `_debian` synthetic key-holder is per-tenant; key rotation
+  is a manual SQL exercise. Same posture as Alpine. A `/key/rotate`
+  endpoint that re-publishes the public key under a new name is
+  worth designing once we have a real operational need.
+- Origin in the Release file is the constant string `"pkgmirror"`.
+  Forgejo uses the application name; we use a fixed value so
+  renaming a tenant doesn't break apt's repo fingerprint cache.
+
+---
+
 ## 2026-05-28 — Adopt Forgejo's ExclusivePool + add built-in TLS
 
 Two follow-ups from the Maven implementation review.

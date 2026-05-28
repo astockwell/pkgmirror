@@ -50,6 +50,7 @@ jobs:
             ruby:3.3-slim
             alpine:3.20
             maven:3.9-eclipse-temurin-21
+            debian:bookworm-slim
             curlimages/curl:8.10.1
           )
           for img in "${images[@]}"; do

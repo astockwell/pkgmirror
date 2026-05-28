@@ -185,8 +185,39 @@ adaptation.
   per-extension dispatch (pom triggers metadata extraction, checksum
   sidecars verified-but-not-stored, jar/other as ordinary blobs), and
   the on-demand `maven-metadata.xml` builder are modeled on upstream.
-  Per-package upload locking uses a `sync.Map` rather than forgejo's
-  `ExclusivePool` but serves the same purpose.
+  Per-package upload locking uses `internal/syncutil.ExclusivePool`,
+  itself ported from upstream.
+
+#### Debian
+
+- [`internal/packages/debian/parser.go`](internal/packages/debian/parser.go)
+  ← `modules/packages/debian/metadata.go` — direct transliteration
+  of the `ar`-archive walker, the gz/xz/zst control.tar decompression
+  switch, the dpkg 1.15.6+ trailing-slash quirk, and the control
+  file scanner (RFC 822-ish with leading-whitespace continuation
+  rules; Maintainer address parsing via `net/mail`).
+- [`internal/packages/debian/parser_test.go`](internal/packages/debian/parser_test.go)
+  ← `modules/packages/debian/metadata_test.go` — fixtures and the
+  per-compression-algorithm round-trip ported verbatim.
+- [`internal/packages/debian/index.go`](internal/packages/debian/index.go)
+  ← `services/packages/debian/repository.go` — the Packages text
+  format (verbatim control paragraph + Filename/Size/MD5sum/SHA*
+  lines), the Release file paragraph layout, the per-tenant
+  OpenPGP keypair generator, and the
+  detached-Release.gpg + clearsigned-InRelease pair are all modeled
+  on upstream. One deviation: we derive the Release `Date:` field
+  from `max(file.created_unix)` across the distribution rather than
+  `time.Now()`, so two separate GET requests for `/Release` and
+  `/Release.gpg` produce byte-identical Release bodies (signature
+  verifies). Forgejo dodges this by persisting Release as a file
+  row at build time; we generate on demand.
+- [`internal/packages/debian/handler.go`](internal/packages/debian/handler.go)
+  ← `routers/api/packages/debian/debian.go` — the route shape
+  (`/key.gpg`, `/dists/...`, `/pool/...`), the composite-key file
+  storage (`<dist>|<comp>|<arch>|<basename>` in the file Name),
+  HEAD-for-existence-check support, and the per-tenant
+  ExclusivePool guard around first-time key generation are all
+  modeled on upstream.
 
 ---
 

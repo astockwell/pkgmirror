@@ -1,5 +1,10 @@
 // Copyright 2026 Alex Stockwell and pkgmirror contributors.
+// Portions Copyright 2016 The Gogs Authors.
 // SPDX-License-Identifier: MIT
+//
+// Ported from forgejo/modules/sync/exclusive_pool.go (MIT), itself
+// originally from Gogs. The refcount-based map-of-mutexes pattern is
+// preserved verbatim so callers can model on either codebase.
 
 package syncutil
 

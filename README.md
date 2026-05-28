@@ -15,7 +15,7 @@ there's one place to answer from.
 
 ## Status
 
-Eight formats shipped, plus a working policy + audit engine. Active
+Nine formats shipped, plus a working policy + audit engine. Active
 development; APIs surface-area-stable but no LTS guarantees yet.
 
 ### Package formats
@@ -28,7 +28,8 @@ development; APIs surface-area-stable but no LTS guarantees yet.
 - [x] Generic (`generic`) — PUT/GET/DELETE arbitrary blobs at `<name>/<version>/<filename>`
 - [x] Alpine (`alpine`) — `apk add` / `apk update`, signed APKINDEX.tar.gz, per-tenant RSA key
 - [x] Maven (`maven`) — `mvn deploy` / `mvn dependency:get`, POM metadata extraction, generated maven-metadata.xml, SHA-1/MD5/SHA-256/SHA-512 sidecar verification
-- [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, Swift, RPM, Debian, ALT, Arch, CRAN, Vagrant, Chef
+- [x] Debian (`debian`) — `apt update` / `apt-cache show`, on-demand Packages/Release indices, per-tenant OpenPGP signing (Release.gpg + InRelease)
+- [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, Swift, RPM, ALT, Arch, CRAN, Vagrant, Chef
 
 Every format goes through the same ingest / storage / serve pipeline, so
 the supply-chain controls below apply uniformly across all of them.
@@ -444,6 +445,86 @@ canonical license string is extracted from each artifact's POM and
 flows through the same supply-chain policy engine as every other
 format (cooldown, allowlist, quarantine).
 
+## Using the Debian (apt) registry
+
+pkgmirror serves a standard Debian binary repository at
+`/api/packages/:tenant/debian/`. The layout matches what `apt`
+expects out of the box: `pool/<dist>/<component>/<file>.deb` for
+artifacts, `dists/<dist>/...` for the signed index family. On first
+request pkgmirror lazily generates a per-tenant OpenPGP signing
+keypair; subsequent `apt update` calls sign the
+`InRelease` / `Release.gpg` files with the same key.
+
+Install the public key into apt's trust store:
+
+```sh
+mkdir -p /etc/apt/keyrings
+curl -fsS -u x:$PKGMIRROR_ADMIN_TOKEN \
+    http://localhost:8080/api/packages/default/debian/key.gpg \
+    | gpg --dearmor -o /etc/apt/keyrings/pkgmirror.gpg
+```
+
+Configure the sources file. Note the `Signed-By:` line — apt 2.x
+deprecates the global trust store, so each repo carries the
+keyring path that signs it:
+
+```sh
+cat > /etc/apt/sources.list.d/pkgmirror.sources <<EOF
+Types: deb
+URIs: http://localhost:8080/api/packages/default/debian
+Suites: bookworm
+Components: main
+Signed-By: /etc/apt/keyrings/pkgmirror.gpg
+EOF
+```
+
+Credentials for non-public tenants go in `/etc/apt/auth.conf.d/`.
+**The `URIs:` value MUST include the protocol (`http://`)** — apt
+2.x rejects unprotected `machine` lines as a security precaution:
+
+```sh
+cat > /etc/apt/auth.conf.d/pkgmirror.conf <<EOF
+machine http://localhost:8080/api/packages/default/debian
+login x
+password $PKGMIRROR_ADMIN_TOKEN
+EOF
+chmod 600 /etc/apt/auth.conf.d/pkgmirror.conf
+```
+
+Now the standard workflow works:
+
+```sh
+apt-get update
+apt-cache show mypackage
+apt-get install -y mypackage
+```
+
+Publish a `.deb`. The distribution (e.g. `bookworm`, `bullseye`) and
+component (e.g. `main`, `contrib`) come from the path; the
+architecture is parsed out of the `.deb`'s `control` file:
+
+```sh
+curl -fsS -X PUT \
+    -u x:$PKGMIRROR_ADMIN_TOKEN \
+    --data-binary @./mypackage_1.0.0_amd64.deb \
+    http://localhost:8080/api/packages/default/debian/pool/bookworm/main/upload
+```
+
+Delete a published `.deb`:
+
+```sh
+curl -fsS -X DELETE \
+    -u x:$PKGMIRROR_ADMIN_TOKEN \
+    http://localhost:8080/api/packages/default/debian/pool/bookworm/main/mypackage/1.0.0/amd64
+```
+
+The `Packages` / `Packages.gz` / `Packages.xz` indices and the
+`Release` / `Release.gpg` / `InRelease` triple are all generated on
+demand from the live package list — no build-on-upload coordination.
+The `Date:` field in `Release` is derived from the newest file in the
+distribution so the detached signature in `Release.gpg` matches the
+plain `Release` body byte-for-byte across separate requests.
+
 ## TLS
 
 pkgmirror can terminate TLS itself. Set both
@@ -503,6 +584,7 @@ internal/packages/    format-agnostic service layer (create package + file)
   generic/            Pass-through PUT/GET/DELETE handlers, no parser
   alpine/             .apk PKGINFO parser + APKINDEX.tar.gz builder + RSA signing
   maven/              pom.xml parser + maven-metadata.xml generator + checksum sidecars
+  debian/             .deb parser + on-demand Packages/Release builder + OpenPGP signing
 internal/server/      Gin router + middleware
 internal/ui/          Bootstrap-based HTML UI
 templates/            html/template files

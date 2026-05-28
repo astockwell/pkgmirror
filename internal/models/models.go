@@ -23,6 +23,7 @@ const (
 	TypeGeneric   Type = "generic"
 	TypeAlpine    Type = "alpine"
 	TypeMaven     Type = "maven"
+	TypeDebian    Type = "debian"
 )
 
 // PropertyRefType identifies the entity a property is attached to.
