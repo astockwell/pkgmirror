@@ -13,6 +13,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
+	"github.com/astockwell/pkgmirror/internal/packages/container"
 	"github.com/astockwell/pkgmirror/internal/packages/goproxy"
 	"github.com/astockwell/pkgmirror/internal/packages/npm"
 	"github.com/astockwell/pkgmirror/internal/packages/pypi"
@@ -71,6 +72,11 @@ func New(d Deps) (*gin.Engine, error) {
 
 	rubygemsGroup := r.Group("/api/packages/:tenant/rubygems")
 	rubygems.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(rubygemsGroup)
+
+	// Container (OCI) lives at the root /v2/... per the OCI distribution
+	// spec; clients don't tolerate a path prefix. Tenant is the first
+	// path segment after /v2.
+	container.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(r)
 
 	if d.Rules != nil {
 		(&admin.Handler{

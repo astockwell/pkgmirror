@@ -15,9 +15,9 @@ Roadmap (from `pkgmirror-spec.md`):
 - [x] PyPI (`pypi`) — wheel + sdist upload, PEP 503 simple index, PEP 691 JSON
 - [x] npm (`npm`) — publish, packument, tarball download, dist-tags, scoped packages
 - [x] RubyGems (`rubygems`) — `gem push` / `gem install`, compact index, legacy specs.4.8.gz, yank
+- [x] Container / OCI (`container`) — OCI distribution v1.1: manifests, blobs (monolithic + chunked), tags, token-exchange auth dance
 - [ ] Generic
 - [ ] Maven
-- [ ] Container (OCI)
 - [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, Swift, RPM, Debian, Alpine, ALT, Arch, CRAN, Vagrant, Chef
 
 ## Quickstart
@@ -196,6 +196,47 @@ used by older clients. `gem push` sends the raw token as the
 accepts that form alongside `Bearer` and `Basic` because pkgmirror tokens
 carry an unambiguous `pkm_` prefix.
 
+## Using the container (OCI) registry
+
+Unlike every other format, OCI clients (`docker`, `podman`, `crane`,
+`skopeo`, `oras`) require the registry endpoint to live at the host
+root (`/v2/...`), not under `/api/packages/`. pkgmirror mounts the OCI
+endpoints at `/v2/:tenant/:image/...` so the image reference shape is
+`<host>:<port>/<tenant>/<image>:<tag>`.
+
+Log in with `docker login` (or `crane auth login`); the username is
+ignored, the password is your pkgmirror token:
+
+```sh
+echo "$PKGMIRROR_ADMIN_TOKEN" | docker login localhost:8080 -u any --password-stdin
+```
+
+Push an image:
+
+```sh
+docker tag alpine:3.20 localhost:8080/default/alpine:3.20
+docker push localhost:8080/default/alpine:3.20
+```
+
+Or with `crane`:
+
+```sh
+crane copy alpine:3.20 localhost:8080/default/alpine:3.20
+crane manifest localhost:8080/default/alpine:3.20
+crane ls localhost:8080/default/alpine
+```
+
+OCI clients speak a token-exchange dance: hit `/v2/`, follow the
+`WWW-Authenticate: Bearer realm=...` header to `/v2/token`, exchange
+Basic credentials for a bearer token, then use that bearer for the rest
+of the session. pkgmirror's token endpoint round-trips the password
+from Basic back as the bearer value, so the same `pkm_` token works
+throughout. Anonymous reads on public tenants get a placeholder bearer
+(`anonymous`) that the auth middleware silently treats as no-identity.
+
+Limitations of the MVP: image names are single-segment only (no
+`myorg/myimage`), no cross-repo blob mount, no `/v2/_catalog`.
+
 ## Project layout
 
 ```
@@ -209,6 +250,7 @@ internal/packages/    format-agnostic service layer (create package + file)
   pypi/               PyPI parser + HTTP handlers
   npm/                npm parser + HTTP handlers
   rubygems/           RubyGems parser + Ruby Marshal encoder + HTTP handlers
+  container/          OCI manifest parser + blob upload tracker + /v2/ handlers
 internal/server/      Gin router + middleware
 internal/ui/          Bootstrap-based HTML UI
 templates/            html/template files

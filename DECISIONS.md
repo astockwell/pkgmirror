@@ -5,6 +5,111 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-27 — Container / OCI format (fifth format landed)
+
+**Decision:** Implement OCI distribution v1.1 as the fifth format. This
+is the playbook's "very high" complexity entry and the only format on
+the roadmap that can't be mounted under `/api/packages/:tenant/...` —
+OCI clients hard-code `/v2/` at the host root. Routes live at
+`/v2/:tenant/:image/...`.
+
+Routes:
+
+- `GET    /v2/`                                    — version probe (200 if authed; 401 with `WWW-Authenticate: Bearer realm=...` if not)
+- `GET    /v2/token`                               — Basic → Bearer exchange (round-trips the password as the token)
+- `GET    /v2/:tenant/:image/tags/list`            — `crane ls` / `docker image ls`
+- `HEAD   /v2/:tenant/:image/manifests/:reference` — manifest exists?
+- `GET    /v2/:tenant/:image/manifests/:reference` — fetch manifest (tag or digest)
+- `PUT    /v2/:tenant/:image/manifests/:reference` — upload manifest
+- `DELETE /v2/:tenant/:image/manifests/:reference` — delete manifest (digest cleans property; tag is soft-delete)
+- `HEAD   /v2/:tenant/:image/blobs/:digest`        — blob exists?
+- `GET    /v2/:tenant/:image/blobs/:digest`        — fetch blob
+- `POST   /v2/:tenant/:image/blobs/uploads/`       — start upload (supports monolithic shortcut via `?digest=...`)
+- `PATCH  /v2/:tenant/:image/blobs/uploads/:uuid`  — chunked write
+- `PUT    /v2/:tenant/:image/blobs/uploads/:uuid`  — finalize with `?digest=...`
+- `DELETE /v2/:tenant/:image/blobs/uploads/:uuid`  — cancel
+
+**Token-exchange auth:** Modeled on the spec, not on Forgejo's JWT
+issuance. Our `/v2/token` endpoint:
+
+1. Accepts HTTP Basic.
+2. Extracts the password half (our existing tokens are inherently
+   bearer-compatible — they're random 32-char base32 strings).
+3. Returns it back as the bearer token in a JSON envelope.
+
+So `pkm_<32 chars>` flows through unchanged: Basic password → bearer
+token → next request's `Authorization: Bearer <same value>` →
+extractToken recognizes it as a pkm-prefixed token. The /v2/token
+endpoint is effectively a no-op pass-through. Forgejo issues short-lived
+scoped JWTs; we chose simplicity instead and document the trade-off here.
+
+**Anonymous bearer:** `go-containerregistry` (the library `crane` is
+built from) rejects an empty `token` field in the bearer response.
+For anonymous callers we return the literal string `"anonymous"` as the
+bearer, which our auth middleware fails to look up and treats as
+no-identity. This lets public-tenant reads work even when the client
+mechanically follows the bearer dance.
+
+**Storage model:** A repo is a Package; a tag is a Version (with the
+manifest digest + media type stored in MetadataJSON). Manifest bytes are
+just another content-addressed Blob. Looking up a blob by digest uses a
+`container.blob.<digest>` package property mapping to `blob_id` — no
+new schema. Looking up a manifest by digest uses
+`container.manifest.<digest>` plus a sibling
+`container.mediatype.<digest>` so HEAD can return Content-Type without
+re-parsing the manifest JSON.
+
+**In-memory upload tracker:** OCI's blob upload protocol is stateful
+(POST opens a session, PATCH appends chunks, PUT finalizes). We keep
+each in-flight session in a `sync.Mutex`-guarded map keyed by UUID,
+backed by a temp file. State is in-process only — a pkgmirror restart
+cancels in-flight uploads. Fine for typical `crane push` durations
+(seconds); persisting the tracker is a clear follow-up if we ever care
+about multi-hour pushes.
+
+**Monolithic POST shortcut:** The spec allows
+`POST /blobs/uploads/?digest=...` with the bytes in the body as a
+one-shot upload, skipping the PATCH/PUT round trip. We support it
+because some clients (notably `oras`) use it by default.
+
+**MVP scope limits (documented in handler.go and README):**
+- Image names are a single path segment. `myorg/myimage`-style
+  multi-segment names need Gin wildcard routing + regex dispatch
+  similar to Forgejo's; deferred.
+- No cross-repo blob mount via `?mount=<digest>&from=<other-repo>`.
+  Clients that try this fall through to a normal upload session, which
+  is spec-allowed.
+- No `/v2/_catalog`. Cheap to add but not needed by any normal
+  push/pull flow.
+
+**Black-box conformance via library, not CLI:** We use
+`go-containerregistry`'s `remote.Write` / `remote.Image` directly from
+the test process rather than running `crane` in a docker container. The
+library IS what crane is built on — the wire format is identical — and
+it removes the need for the client container to have internet access
+to pull a base image. The four tests cover: push+pull round-trip with
+digest verification, tags listing across 3 pushed tags, anonymous pull
+on a public tenant, and empty `scratch` image push (no layers, just a
+config blob).
+
+**What I'd revisit:**
+- Multi-segment image names. The wildcard route is mechanical but
+  changes the dispatch shape enough that I didn't want to do it
+  speculatively.
+- The bearer-token endpoint should mint actual short-lived,
+  scope-limited tokens instead of round-tripping. Pre-existing
+  `Authorization: Bearer pkm_...` headers would still work; the change
+  is additive.
+- A real OCI image config parser would let the policy engine see the
+  labels (org.opencontainers.image.licenses, .source, .description)
+  the way Forgejo does. That's a clean evolution and the right place
+  for the supply-chain controls to hook in.
+
+Dependency added: `github.com/google/go-containerregistry` (test-only,
+pulled in by the blackbox suite under `//go:build blackbox`).
+
+---
+
 ## 2026-05-27 — RubyGems format (fourth format landed)
 
 **Decision:** Implement RubyGems as the fourth package format, mounted at
