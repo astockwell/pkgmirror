@@ -5,6 +5,62 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-28 — Automated guard against the duplicate-`package` artifact
+
+**Symptom.** Several times during the multi-month build, a Go file
+in this repo arrived at the next test run with a duplicate
+`package X` declaration and a spurious copyright-header fragment
+inserted right after the legitimate one. Result: `go build` fails
+with `expected declaration, found 'package'`. The most recent
+instance bit `internal/syncutil/exclusive_pool_test.go` between the
+ExclusivePool ship and the Debian ship, dropping the stress loop.
+
+**What's triggering it.** Unknown. It's almost certainly a VS Code
+Go-extension format-on-save or paste-handler bug in my local dev
+environment — not file-specific, not consistently reproducible, not
+something I can chase in pkgmirror itself.
+
+**Decision.** Stop chasing the trigger. Guard the repository so a
+bad commit can't land regardless of which editor or tool caused it.
+Three layers:
+
+1. `tools/dedup-package/` — a small Go tool that detects (and with
+   `-fix` repairs) the duplicate. Uses `go/scanner` so it doesn't
+   false-positive on `package X` strings inside test-file string
+   literals (which an earlier regex-based prototype did). Refuses to
+   auto-fix any span that contains real code rather than just
+   comments + blanks — better to surface for human review than
+   silently delete a function. Test coverage: clean / detected /
+   fixed / refused-on-ambiguous.
+
+2. `make check-package-dupes` runs the tool in check-only mode and
+   is wired as a `vet:` prerequisite; `make fix-package-dupes`
+   repairs in place. CI workflow runs the same check before
+   `go vet`, so a bad state can't even land in main via PR.
+
+3. `.githooks/pre-commit` runs the tool on every local commit.
+   `make install-hooks` symlinks it. The hook also documents
+   `--no-verify` as the escape hatch (for when investigating the
+   trigger itself).
+
+Net effect: regardless of which contributor's editor causes the
+artifact, the bad bytes don't make it into the working tree.
+
+**Verified end-to-end:** I deliberately poisoned a file matching the
+observed pattern, confirmed `git commit` was blocked by the hook
+with a clear error message, confirmed `make fix-package-dupes`
+repaired it byte-correctly, and confirmed the rebuilt file compiles
++ `go vet`s clean.
+
+**What I'd revisit later:** investigating the actual source of the
+duplication. The most likely culprit is a VS Code Go-extension
+hook firing on paste or on save, or possibly an aggressive
+`goimports` config — but figuring that out is editor-specific and
+the guard above is the right defense even if I do eventually pin
+down the trigger.
+
+---
+
 ## 2026-05-28 — Debian format (ninth format landed)
 
 **Decision:** Implement Forgejo's Debian (apt) registry as the ninth

@@ -132,9 +132,9 @@ test-all: test test-blackbox ## Run unit + grey-box + black-box.
 
 # ---- Lint / format -----------------------------------------------------------
 
-.PHONY: lint vet fmt fmt-check tidy verify
+.PHONY: lint vet fmt fmt-check tidy verify check-package-dupes fix-package-dupes install-hooks
 
-vet: ## Run go vet across all packages.
+vet: check-package-dupes ## Run go vet across all packages.
 	$(GO) vet ./...
 
 lint: vet ## Alias for vet; reserved for richer linters later.
@@ -147,6 +147,20 @@ fmt-check: ## Fail if any Go file is not gofmt'd (use in CI).
 	if [ -n "$$out" ]; then \
 		echo "gofmt: files need formatting:"; echo "$$out"; exit 1; \
 	fi
+
+check-package-dupes: ## Detect duplicate `package X` declarations (CI-safe; exit 1 on bad).
+	@$(GO) run ./tools/dedup-package .
+
+fix-package-dupes: ## Repair duplicate `package X` declarations in place.
+	@$(GO) run ./tools/dedup-package -fix .
+
+install-hooks: ## Symlink .githooks into .git/hooks so pre-commit runs locally.
+	@mkdir -p .git/hooks
+	@for h in .githooks/*; do \
+		name=$$(basename "$$h"); \
+		ln -sf "../../$$h" ".git/hooks/$$name"; \
+		echo "installed: .git/hooks/$$name -> ../../$$h"; \
+	done
 
 tidy: ## go mod tidy.
 	$(GO) mod tidy

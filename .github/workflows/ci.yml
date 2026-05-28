@@ -17,6 +17,13 @@ jobs:
           go-version: "1.26"
           cache: true
 
+      - name: Check for duplicate package declarations
+        # Some local auto-formatters periodically prepend a second
+        # `package X` declaration. Catch it here so the bad state
+        # never lands in main, regardless of which contributor's
+        # editor caused it.
+        run: go run ./tools/dedup-package .
+
       - name: go vet
         run: go vet ./...
 

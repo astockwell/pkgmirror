@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Copyright 2026 Alex Stockwell and pkgmirror contributors.
+# SPDX-License-Identifier: MIT
+#
+# Pre-commit hook. Blocks the commit if any staged Go file contains
+# a duplicate `package X` declaration — a recurring symptom of a
+# misbehaving auto-formatter or paste handler in the local dev
+# environment. The diagnostic is precise: tools/dedup-package uses
+# go/scanner so it doesn't false-positive on string literals.
+#
+# Install: `make install-hooks` (or symlink manually).
+#
+# Bypass: `git commit --no-verify` if you absolutely have to. CI runs
+# the same check, so you'll just hit it again at PR time.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# Restrict to staged Go files only; nothing else needs the check.
+staged_go=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.go$' || true)
+if [ -z "$staged_go" ]; then
+  exit 0
+fi
+
+# The detector walks the working tree, not just staged files. That's
+# the conservative choice: if we have a duplicate in an unstaged file
+# we still want to know now rather than discover it on the next
+# `go build`. The Go compiler is the ultimate consumer here.
+if ! go run ./tools/dedup-package . ; then
+  cat <<'MSG' >&2
+
+The duplicate `package X` artifact is back. Run:
+
+    make fix-package-dupes
+
+to repair the affected files, then re-stage and re-commit. If you
+need to commit anyway (e.g. you're investigating the source of the
+duplication), pass --no-verify.
+MSG
+  exit 1
+fi
