@@ -15,7 +15,7 @@ there's one place to answer from.
 
 ## Status
 
-Ten formats shipped, plus a working policy + audit engine. Active
+Eleven formats shipped, plus a working policy + audit engine. Active
 development; APIs surface-area-stable but no LTS guarantees yet.
 
 ### Package formats
@@ -30,7 +30,8 @@ development; APIs surface-area-stable but no LTS guarantees yet.
 - [x] Maven (`maven`) — `mvn deploy` / `mvn dependency:get`, POM metadata extraction, generated maven-metadata.xml, SHA-1/MD5/SHA-256/SHA-512 sidecar verification
 - [x] Debian (`debian`) — `apt update` / `apt-cache show`, on-demand Packages/Release indices, per-tenant OpenPGP signing (Release.gpg + InRelease)
 - [x] RPM (`rpm`) — `dnf install` / `dnf info`, on-demand primary/filelists/other + repomd.xml indices, per-tenant OpenPGP-signed `repomd.xml.asc`
-- [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, Swift, ALT, Arch, CRAN, Vagrant, Chef
+- [x] NuGet (`nuget`) — `dotnet add package` / `dotnet nuget push`, V3 service index + registration + package-base-address + search + publish, multipart + raw upload, `X-NuGet-ApiKey` auth
+- [ ] Cargo, Composer, Conan, Conda, Helm, Pub, Swift, ALT, Arch, CRAN, Vagrant, Chef
 
 Every format goes through the same ingest / storage / serve pipeline, so
 the supply-chain controls below apply uniformly across all of them.
@@ -588,6 +589,77 @@ separate requests — same Stable-Bytes pattern as Debian. See
 [docs/known-deviations-from-spec.md](docs/known-deviations-from-spec.md)
 for the details.
 
+## Using the NuGet registry
+
+The NuGet endpoints are rooted at `/api/packages/:tenant/nuget/`
+and implement the V3 protocol that the modern `dotnet` CLI and
+Visual Studio 2017+ speak. V2 (OData) is not exposed.
+
+Register the source with `dotnet nuget`:
+
+```sh
+dotnet nuget add source \
+    http://localhost:8080/api/packages/default/nuget/index.json \
+    --name pkgmirror \
+    --username x \
+    --password $PKGMIRROR_ADMIN_TOKEN \
+    --store-password-in-clear-text
+```
+
+Push a `.nupkg`. Either `--api-key` (sent as `X-NuGet-ApiKey`) or
+the source's stored Basic-auth credentials work:
+
+```sh
+dotnet nuget push ./bin/Release/MyPackage.1.0.0.nupkg \
+    --source pkgmirror \
+    --api-key $PKGMIRROR_ADMIN_TOKEN
+```
+
+Consume from a project:
+
+```sh
+cd /path/to/my/app
+dotnet add package MyPackage --version 1.0.0
+dotnet restore
+```
+
+Delete a published version:
+
+```sh
+curl -fsS -X DELETE \
+    -u x:$PKGMIRROR_ADMIN_TOKEN \
+    http://localhost:8080/api/packages/default/nuget/mypackage/1.0.0
+```
+
+The V3 service-index document is generated per-request with absolute
+`@id` URLs rebuilt from the inbound Host header + TLS state. There
+is no build-time base-URL configuration: clients hitting pkgmirror
+via different hostnames each get a service index that points back
+to themselves.
+
+Endpoints exposed under each tenant:
+
+- `GET /index.json` — V3 service index
+- `GET /query?q=<substring>` — search
+- `GET /registration/<id>/index.json` — registration index
+- `GET /registration/<id>/<version>.json` — registration leaf
+- `GET /package/<id>/index.json` — versions list
+- `GET /package/<id>/<version>/<id>.<version>.nupkg` — download .nupkg
+- `GET /package/<id>/<version>/<id>.nuspec` — download nuspec
+- `PUT /` — publish (multipart/form-data or raw octet-stream)
+- `DELETE /<id>/<version>` — hard-delete a version
+
+URL-path components are case-folded to lowercase per
+[NuGet's V3 spec](https://learn.microsoft.com/en-us/nuget/api/overview);
+upload preserves the original-case id in the registration index's
+`catalogEntry.id` so consumers see the package name as the author
+intended.
+
+Search is a simple case-insensitive substring match against the
+package id; we don't currently ship full-text ranking. Symbol
+packages (`.snupkg`) round-trip the upload path but the simple-
+symbol-query protocol for debugger lookup is not yet implemented.
+
 ## TLS
 
 pkgmirror can terminate TLS itself. Set both
@@ -649,6 +721,7 @@ internal/packages/    format-agnostic service layer (create package + file)
   maven/              pom.xml parser + maven-metadata.xml generator + checksum sidecars
   debian/             .deb parser + on-demand Packages/Release builder + OpenPGP signing
   rpm/                .rpm header parser + on-demand repomd/primary/filelists/other + OpenPGP signing
+  nuget/              .nupkg/.nuspec parser + V3 service index + registration + search + publish
 internal/server/      Gin router + middleware
 internal/ui/          Bootstrap-based HTML UI
 templates/            html/template files

@@ -20,6 +20,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/packages/goproxy"
 	"github.com/astockwell/pkgmirror/internal/packages/maven"
 	"github.com/astockwell/pkgmirror/internal/packages/npm"
+	"github.com/astockwell/pkgmirror/internal/packages/nuget"
 	"github.com/astockwell/pkgmirror/internal/packages/pypi"
 	"github.com/astockwell/pkgmirror/internal/packages/rpm"
 	"github.com/astockwell/pkgmirror/internal/packages/rubygems"
@@ -92,6 +93,9 @@ func New(d Deps) (*gin.Engine, error) {
 
 	rpmGroup := r.Group("/api/packages/:tenant/rpm")
 	rpm.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(rpmGroup)
+
+	nugetGroup := r.Group("/api/packages/:tenant/nuget")
+	nuget.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(nugetGroup)
 
 	// Container (OCI) lives at the root /v2/... per the OCI distribution
 	// spec; clients don't tolerate a path prefix. Tenant is the first

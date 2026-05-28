@@ -750,36 +750,74 @@ Ruby gems.
   bundle install
   ```
 
-### `nuget`
+### `nuget` ✓ shipped
 
-.NET packages. Has two parallel protocols, V2 (OData) and V3 (JSON).
+.NET packages. See `internal/packages/nuget/` for the reference
+implementation. V3 (JSON) only; we do not ship V2 (OData).
 
 - **Spec:** [NuGet Server API v3](https://learn.microsoft.com/en-us/nuget/api/overview)
 - **Forgejo:**
-  - `forgejo/routers/api/packages/nuget/api_v2.go`, `api_v3.go` — two
-    protocol versions, both needed for full client compatibility
-  - `forgejo/routers/api/packages/nuget/links.go` — `@id` URL rewriting
-  - `forgejo/routers/api/packages/nuget/auth.go` — NuGet's API key header
-  - `forgejo/modules/packages/nuget/metadata.go` — parses `.nupkg` (a
-    zip with a `.nuspec` XML file)
-  - `forgejo/modules/packages/nuget/symbol_extractor.go` — debug symbols
-- **Parser complexity:** moderate; the protocol surface is large because
-  of V2 + V3.
-- **Patterns expected:** `HEAD` support (NuGet client probes for
-  symbol packages with HEAD before GET), `ExclusivePool` for the
-  `.nupkg` + `.snupkg` upload pair, on-demand V3 `index.json` (the
-  service-discovery document referencing all the V3 resource URLs by
-  type), URL rewriting in `@id` fields so clients see absolute
-  pkgmirror URLs rather than upstream ones (Forgejo's `links.go` is
-  the reference). NuGet's API key auth header
-  (`X-NuGet-ApiKey: <token>`) is format-specific; the existing auth
-  middleware accepts it alongside Bearer / Basic.
+  - `forgejo/routers/api/packages/nuget/api_v3.go` — V3 JSON
+    response shapes
+  - `forgejo/routers/api/packages/nuget/links.go` — `@id` URL
+    rewriting helpers
+  - `forgejo/routers/api/packages/nuget/auth.go` — the
+    `X-NuGet-ApiKey` header that `dotnet nuget push` sends
+  - `forgejo/modules/packages/nuget/metadata.go` — parses
+    `.nupkg` (a zip with a `.nuspec` XML file at the root)
+- **Routes** (all under `/api/packages/:tenant/nuget`):
+  - `GET    /index.json` — V3 service index
+  - `GET    /query?q=<substring>` — search
+  - `GET    /registration/:id/index.json` — registration index
+  - `GET    /registration/:id/:version.json` — registration leaf
+  - `GET    /package/:id/index.json` — versions list
+  - `GET    /package/:id/:version/:filename` — download `.nupkg` / `.nuspec`
+  - `PUT    /` — publish (multipart/form-data or raw octet-stream)
+  - `DELETE /:id/:version` — hard-delete a version
+  - `HEAD` on every `GET`
+- **Parser complexity:** moderate. `.nuspec` XML has a handful of
+  optional fields and a non-trivial version normalization rule
+  (NuGet's "normalized version"). Lean on Forgejo's parser verbatim.
+- **Patterns used:**
+  - `ExclusivePool` keyed on `<tenantID>|<lowerID>` so concurrent
+    `.nupkg`/`.snupkg` PUTs serialize without spurious
+    `ErrDuplicatePackageVersion`.
+  - V3 `@id` rewriting per request from `c.Request.Host` +
+    `c.Request.TLS` — clients reaching pkgmirror via different
+    hostnames get a service index pointing back to themselves.
+  - Lowercase URL components per the V3 spec; original-case ID
+    preserved in `catalogEntry.id`.
+  - `HEAD` support on every `GET` for the dotnet cache.
+  - Two catch-all gin routes (`/registration/*tail` +
+    `/package/*tail`) work around gin's "duplicate path conflict"
+    when mixing a literal segment (`index.json`) with a parameter
+    (`:version`) at the same level.
+- **Format-specific auth:** `dotnet nuget push --api-key <token>`
+  sends `X-NuGet-ApiKey: <token>`. The pkgmirror auth middleware
+  honors it via a fall-through in `extractToken`; no per-format
+  auth shim required.
 - **Black-box client:** `mcr.microsoft.com/dotnet/sdk:8.0`. Commands:
   ```sh
-  dotnet nuget add source http://pkgmirror:8080/api/packages/<tenant>/nuget/index.json -n pkgmirror -u x -p $TOKEN
-  dotnet nuget push -s pkgmirror foo.1.0.0.nupkg
-  dotnet add package foo --version 1.0.0
+  # Drop nuget.org first so the test is CI-independent
+  dotnet nuget remove source nuget.org || true
+  dotnet nuget add source \
+      http://pkgmirror:8080/api/packages/<tenant>/nuget/index.json \
+      --name pkgmirror -u x -p $TOKEN --store-password-in-clear-text
+  # Publish
+  dotnet nuget push foo.1.0.0.nupkg --source pkgmirror --api-key $TOKEN
+  # Consume
+  dotnet new console -o app --no-restore
+  cd app && dotnet add package foo --version 1.0.0
   ```
+- **Client gotchas:**
+  - `dotnet add package --source <name>` (where `<name>` is the
+    friendly name from NuGet.Config) is silently interpreted as a
+    local file path. The workable form is to configure pkgmirror
+    as the *only* source (`dotnet nuget remove source nuget.org`
+    first) and let `dotnet add package` consult it implicitly.
+  - `mcr.microsoft.com/dotnet/sdk:8.0` is ~700 MB. Pre-pulled in
+    CI; local runs of `make test-blackbox-nuget` against a cold
+    cache will spend ~30s pulling it.
 
 ### `composer`
 
@@ -1100,7 +1138,7 @@ EOF
 | maven ✓ done | moderate | `modules/packages/maven/` | `maven:3.9-eclipse-temurin-21` |
 | composer | moderate | `modules/packages/composer/` | `composer:2` |
 | cargo | moderate | `modules/packages/cargo/` | `rust:1.81-bookworm` |
-| nuget | moderate | `modules/packages/nuget/` | `mcr.microsoft.com/dotnet/sdk:8.0` |
+| nuget ✓ done | moderate | `modules/packages/nuget/` | `mcr.microsoft.com/dotnet/sdk:8.0` |
 | cran | moderate | `modules/packages/cran/` | `r-base:4.4` |
 | conda | moderate | `modules/packages/conda/` | `continuumio/miniconda3` |
 | vagrant | moderate | `modules/packages/vagrant/` | `hashicorp/vagrant:latest` |

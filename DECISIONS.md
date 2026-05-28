@@ -5,6 +5,132 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-28 — NuGet format (eleventh format landed)
+
+**Decision:** Implement Forgejo's NuGet registry as the eleventh
+package format. Mounts at `/api/packages/:tenant/nuget/` and
+implements the V3 protocol (`SearchQueryService` +
+`RegistrationsBaseUrl` + `PackageBaseAddress/3.0.0` +
+`PackagePublish/2.0.0`). Routes:
+`GET /index.json` + `GET /query` +
+`GET /registration/<id>/(index.json|<version>.json)` +
+`GET /package/<id>/(index.json|<version>/<filename>)` +
+`PUT /` + `DELETE /<id>/<version>`. Ported from
+`forgejo/routers/api/packages/nuget/nuget.go`,
+`forgejo/routers/api/packages/nuget/api_v3.go`,
+`forgejo/routers/api/packages/nuget/links.go`,
+`forgejo/routers/api/packages/nuget/auth.go`, and
+`forgejo/modules/packages/nuget/metadata.go`.
+
+**V3 only — drop V2 (OData / Atom).** Forgejo exposes both V2 and
+V3 for compatibility with legacy `nuget.exe` clients. We don't.
+The modern `dotnet nuget` CLI and Visual Studio 2017+ speak V3
+exclusively; the long tail of `nuget.exe` users still needing V2 is
+small enough that we'd rather ship V3 cleanly now and add V2 later
+if a real user appears. Dropping V2 also drops ~420 LOC of OData
+filter-string parsing (`SearchServiceV2`, `EnumeratePackageVersionsV2`,
+`RegistrationLeafV2`) and the entire `xmlResponse` Atom serialization
+path. Pure subtraction with no observable cost to our target users.
+
+**Symbol packages skipped for MVP.** The .snupkg upload round-trips
+the upload path (it's a regular zip and the parser detects
+`PackageType=SymbolsPackage` from the nuspec), but we don't extract
+portable PDB symbols nor expose the simple-symbol-query protocol
+that lets debuggers fetch them on demand. The full implementation
+is Forgejo's `modules/packages/nuget/symbol_extractor.go` (186 LOC
+of binary portable-PDB parsing) plus a dedicated download endpoint.
+Easy to add later — the .snupkg blob already lands as a sibling
+file row of the .nupkg under the upload's ExclusivePool lock.
+
+**Search is substring, not full-text.** The V3 SearchQueryService
+endpoint exists and returns the right response shape, but the query
+backing it is `WHERE p.lower_name LIKE '%' || lower(q) || '%'`.
+Forgejo runs a real query through `xorm`'s search engine with
+ranked results; that requires a separate FTS5 index (or migration
+off SQLite) we don't currently maintain. dotnet's package manager
+UX still works — it ranks results client-side after fetching the
+candidate list — but search relevance is going to be worse than
+Forgejo's. Captured as a follow-up when we have a real user
+complaining.
+
+**Per-request absolute URL rebuilding.** Forgejo embeds
+`setting.AppURL` (a configured global) in V3 `@id` fields. We
+reconstruct the base per request from the inbound Host header +
+TLS state (same heuristic the RPM `.repo` generator uses). This
+means clients reaching pkgmirror via different hostnames (e.g.
+external DNS name vs internal service name) each get a service
+index that points back to themselves, with zero configuration.
+The trade-off is that a proxy stripping the Host header would
+break it — that's a misconfiguration we'd surface clearly.
+
+**Case-folded URLs per V3 spec.** The NuGet V3 spec mandates
+lowercase URL path components for IDs and versions. Our link
+builder lowercases `id` and `version` in
+`PackageDownloadURL` / `RegistrationIndexURL` / `RegistrationLeafURL`.
+The `catalogEntry.id` field in the registration index preserves
+the original case from the upload, so consumers still see the
+package name as the author intended.
+
+**X-NuGet-ApiKey added as an auth fallback.** `dotnet nuget push
+--api-key <token>` sends the token in `X-NuGet-ApiKey` rather than
+`Authorization`. Rather than implementing a separate `auth.Method`
+(Forgejo's `Auth.Verify` posture), the cleanest fix was to make
+`extractToken` consult `X-NuGet-ApiKey` before falling back to
+the standard `Authorization` header. Three lines of code, no new
+abstraction. Bonus: now applies uniformly to all formats, so any
+other format that wanted to accept the same header gets it free.
+
+**Catch-all `*path` for two endpoint families.** Gin's router
+refuses to mix a literal (`index.json`) with a parameter
+(`:version`) at the same path level (Forgejo's chi-based router
+doesn't have this constraint). The pkgmirror handler uses gin
+catch-alls under `/registration/*tail` and `/package/*tail`,
+splits on `/`, and dispatches on segment count + last-segment
+equality. Same posture Maven uses for its catch-all. Adds ~10 LOC
+of dispatch glue versus Forgejo's flatter route table.
+
+**Multipart and raw octet-stream uploads both accepted.**
+`dotnet nuget push` sends `multipart/form-data` with a single file
+field. `nuget.exe push --DirectPush` and `curl --data-binary @file`
+send raw `application/octet-stream`. The handler sniffs
+Content-Type and reads whichever body shape arrives. The greybox
+suite covers both paths; the blackbox uses raw octet-stream
+(simpler harness) and the blackbox dotnet pull path covers the V3
+read flow end-to-end.
+
+**Black-box stack: mcr.microsoft.com/dotnet/sdk:8.0.** Real
+`dotnet nuget add source` + `dotnet new console` +
+`dotnet add package` against our V3 endpoints. dotnet 8 exercises
+the full service-index → registration-index → package-base-address
+chain. Two non-obvious client gotchas worth surfacing:
+
+  1. `dotnet add package --source <name>` (where `<name>` is the
+     friendly name from NuGet.Config) is silently interpreted as a
+     local file path. The workable form is to configure pkgmirror
+     as the *only* source (`dotnet nuget remove source nuget.org`
+     first) and let `dotnet add package` consult it implicitly.
+     Documented in the blackbox conformance test.
+  2. The mcr.microsoft.com/dotnet/sdk:8.0 image is ~700 MB. We
+     pre-pull it in CI alongside the other client images, but
+     local runs of `make test-blackbox-nuget` against a cold cache
+     will spend their first 30s pulling the image.
+
+**Trade-offs / what I'd revisit:**
+
+- V2 OData + Atom for legacy `nuget.exe` compatibility — ~420 LOC,
+  doable when a user actually asks.
+- Symbol-package PDB extraction + the simple-symbol-query
+  download path — needed only by Visual Studio's "Continue with
+  symbol server" debugger workflow.
+- Real full-text search via SQLite FTS5 — would benefit dotnet's
+  package-search UX once registries grow past a few hundred
+  packages.
+- Multi-segment registration index pagination — Forgejo
+  implements this for very-many-versions cases; we currently emit
+  a single page. Doable without a wire-shape change.
+
+---
+
 ## 2026-05-28 — RPM format (tenth format landed)
 
 **Decision:** Implement Forgejo's RPM registry as the tenth package

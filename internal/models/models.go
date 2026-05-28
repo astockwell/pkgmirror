@@ -25,6 +25,7 @@ const (
 	TypeMaven     Type = "maven"
 	TypeDebian    Type = "debian"
 	TypeRPM       Type = "rpm"
+	TypeNuGet     Type = "nuget"
 )
 
 // PropertyRefType identifies the entity a property is attached to.

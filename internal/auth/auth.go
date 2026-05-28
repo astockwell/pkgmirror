@@ -138,6 +138,13 @@ func (a *TokenAuthenticator) Authenticate(ctx context.Context, r *http.Request) 
 
 // extractToken pulls the plaintext token from the Authorization header.
 func extractToken(r *http.Request) string {
+	// NuGet clients (dotnet / nuget.exe) send the PAT in a custom
+	// X-NuGet-ApiKey header rather than Authorization. Honor it
+	// before falling back to the standard Authorization path. See
+	// https://learn.microsoft.com/en-us/nuget/api/package-publish-resource#request-parameters
+	if k := strings.TrimSpace(r.Header.Get("X-NuGet-ApiKey")); k != "" {
+		return k
+	}
 	h := r.Header.Get("Authorization")
 	if h == "" {
 		return ""

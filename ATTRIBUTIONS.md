@@ -261,6 +261,62 @@ adaptation.
   `RepositoryConfiguration` output verbatim except we auto-detect
   http vs https from the request `TLS` field.
 
+#### NuGet
+
+- [`internal/packages/nuget/parser.go`](internal/packages/nuget/parser.go)
+  ← `modules/packages/nuget/metadata.go` — direct transliteration
+  of the .nuspec XML schema, the package-type discrimination
+  (`DependencyPackage` vs `SymbolsPackage`), the id regex
+  (`\A\w+(?:[.-]\w+)*\z`), the project-URL sanity check, the
+  3 MiB nuspec size limit, and the NuGet "normalized version"
+  algorithm (drop trailing zero on segment 4, strip build
+  metadata, keep pre-release). Identical field shapes so the
+  shared V3 builders consume parsed metadata without translation.
+- [`internal/packages/nuget/parser_test.go`](internal/packages/nuget/parser_test.go)
+  ← `modules/packages/nuget/metadata_test.go` — fixtures and test
+  names mirror upstream so cross-references stay legible. Adapted
+  to standard `testing` (Forgejo uses `testify/assert`).
+- [`internal/packages/nuget/api_v3.go`](internal/packages/nuget/api_v3.go)
+  ← `routers/api/packages/nuget/api_v3.go` +
+  `routers/api/packages/nuget/links.go` — the V3 response shapes
+  (`ServiceIndexResponseV3`, `RegistrationIndexResponse`,
+  `RegistrationIndexPage`, `CatalogEntry`, `PackageDependencyGroup`,
+  `SearchResultResponse`) are byte-compatible with upstream. The
+  `linkBuilder` consolidates `links.go`'s URL constructors with the
+  Base / Next split flattened — pkgmirror does not currently
+  paginate responses. URL components are case-folded to lowercase
+  per the NuGet V3 spec; Forgejo does the same but inherits the
+  case from its `setting.AppURL` rather than a per-request base.
+- [`internal/packages/nuget/handler.go`](internal/packages/nuget/handler.go)
+  ← `routers/api/packages/nuget/nuget.go` — the V3 endpoint shape
+  (service index / search / registration index + leaf / package
+  versions / download / publish / delete) is modeled on the
+  Forgejo handlers. Significant deviations:
+  - V2 (OData/Atom) is not exposed; we ship V3 only.
+  - Symbol packages (.snupkg) round-trip the upload path but the
+    portable PDB extraction
+    (`modules/packages/nuget/symbol_extractor.go`) and the
+    simple-symbol-query download endpoint are not implemented.
+  - Search performs a simple substring match against
+    `packages.lower_name` rather than building a separate
+    full-text index.
+  - The two catch-all path families (`/registration/*tail` and
+    `/package/*tail`) work around gin's "duplicate path conflict"
+    when mixing a literal (`index.json`) with a parameter
+    (`:version`) at the same path level — Forgejo's router
+    doesn't have this constraint.
+  - Per-tenant absolute URL rebuilding in V3 `@id` fields uses
+    the inbound request's Host header + TLS state (same pattern
+    the RPM `.repo` generator uses) rather than a configured
+    `AppURL` setting.
+
+- [`internal/auth/auth.go`](internal/auth/auth.go) — added a
+  fall-through for the `X-NuGet-ApiKey` request header that
+  `dotnet nuget push` and `nuget.exe` use. Modeled on
+  `forgejo/routers/api/packages/nuget/auth.go`'s `Auth.Verify`
+  method, but folded into our existing `extractToken` rather
+  than implementing a separate `auth.Method`.
+
 ---
 
 ## OCI Distribution Spec

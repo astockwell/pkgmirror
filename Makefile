@@ -86,7 +86,7 @@ run-public: ## Run with the default tenant set to public (useful for quick demos
         test-blackbox test-blackbox-go test-blackbox-pypi \
         test-blackbox-npm test-blackbox-rubygems test-blackbox-container \
         test-blackbox-generic test-blackbox-alpine test-blackbox-maven \
-        test-blackbox-debian test-blackbox-rpm
+        test-blackbox-debian test-blackbox-rpm test-blackbox-nuget
 
 test: ## Fast unit + grey-box tests (no docker).
 	$(GO) test ./...
@@ -130,6 +130,9 @@ test-blackbox-debian: ## Debian (apt) conformance only.
 
 test-blackbox-rpm: ## RPM (dnf/yum) conformance only.
 	$(GO) test -tags=blackbox -timeout=$(BB_TIMEOUT) ./tests/blackbox/rpm/...
+
+test-blackbox-nuget: ## NuGet (V3) conformance only.
+	$(GO) test -tags=blackbox -timeout=$(BB_TIMEOUT) ./tests/blackbox/nuget/...
 
 test-all: test test-blackbox ## Run unit + grey-box + black-box.
 
