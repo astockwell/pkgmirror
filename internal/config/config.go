@@ -27,6 +27,11 @@ type Config struct {
 	// tenant. Parsed from PKGMIRROR_DEFAULT_TENANT_VISIBILITY = "private" or
 	// "public". Default: private.
 	DefaultTenantVisibility tenants.Visibility
+
+	// PolicyFile is the optional path to a YAML rule file loaded at boot
+	// and upserted into the policy_rules table. See
+	// plans/supply-chain-policy-engine.md §10 for the schema.
+	PolicyFile string
 }
 
 // Load reads configuration from environment variables, applying defaults.
@@ -45,6 +50,7 @@ func Load() Config {
 		AdminToken:              os.Getenv("PKGMIRROR_ADMIN_TOKEN"),
 		DefaultTenantName:       envOr("PKGMIRROR_DEFAULT_TENANT", "default"),
 		DefaultTenantVisibility: vis,
+		PolicyFile:              os.Getenv("PKGMIRROR_POLICY_FILE"),
 	}
 }
 

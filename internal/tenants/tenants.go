@@ -157,6 +157,16 @@ func (s *Store) AuditReadsEnabled(ctx context.Context, tenantID int64) bool {
 	return v != 0
 }
 
+// ResolveTenantID returns the ID of the named tenant. Used by the
+// policy YAML loader to translate tenant: foo into a tenant_id.
+func (s *Store) ResolveTenantID(ctx context.Context, name string) (int64, error) {
+	t, err := s.GetByName(ctx, name)
+	if err != nil {
+		return 0, err
+	}
+	return t.ID, nil
+}
+
 // Memberships returns the (tenantID -> role) map for a user.
 func (s *Store) Memberships(ctx context.Context, userID int64) (map[int64]Role, error) {
 	rows, err := s.DB.QueryContext(ctx,

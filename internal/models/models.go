@@ -57,7 +57,20 @@ type Version struct {
 	LowerVersion string
 	MetadataJSON string
 	CreatedUnix  int64
+
+	// License is the SPDX identifier, populated at ingest by per-format
+	// extractors. Empty means "unknown".
+	License sql.NullString
+	// QuarantineReason, when non-NULL, marks this version as hidden from
+	// indices and serves. Admin tooling clears it to promote the version.
+	QuarantineReason sql.NullString
+	// QuarantinedByRuleID identifies which policy rule triggered the
+	// quarantine, when one did.
+	QuarantinedByRuleID sql.NullInt64
 }
+
+// IsQuarantined reports whether this version is currently hidden.
+func (v *Version) IsQuarantined() bool { return v != nil && v.QuarantineReason.Valid }
 
 // Blob represents the bytes of a stored object.
 type Blob struct {
@@ -231,14 +244,32 @@ func (s *Store) CreateVersion(ctx context.Context, packageID int64, version, met
 	}, nil
 }
 
+// versionColumns lists every column read by version-scanning queries.
+// Keep the order in sync with scanVersion.
+const versionColumns = `id, package_id, version, lower_version, metadata_json,
+        created_unix, license, quarantine_reason, quarantined_by_rule_id`
+
+func scanVersion(scanner interface {
+	Scan(dest ...any) error
+}) (*Version, error) {
+	v := &Version{}
+	if err := scanner.Scan(
+		&v.ID, &v.PackageID, &v.Version, &v.LowerVersion, &v.MetadataJSON,
+		&v.CreatedUnix, &v.License, &v.QuarantineReason, &v.QuarantinedByRuleID,
+	); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
 // GetVersion looks up a (package_id, version) pair.
 func (s *Store) GetVersion(ctx context.Context, packageID int64, version string) (*Version, error) {
 	row := s.DB.QueryRowContext(ctx,
-		`SELECT id, package_id, version, lower_version, metadata_json, created_unix
+		`SELECT `+versionColumns+`
 		   FROM package_versions WHERE package_id = ? AND lower_version = ?`,
 		packageID, strings.ToLower(version))
-	v := &Version{}
-	if err := row.Scan(&v.ID, &v.PackageID, &v.Version, &v.LowerVersion, &v.MetadataJSON, &v.CreatedUnix); err != nil {
+	v, err := scanVersion(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrVersionNotExist
 		}
@@ -251,7 +282,7 @@ func (s *Store) GetVersion(ctx context.Context, packageID int64, version string)
 // creation time.
 func (s *Store) ListVersions(ctx context.Context, packageID int64) ([]*Version, error) {
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT id, package_id, version, lower_version, metadata_json, created_unix
+		`SELECT `+versionColumns+`
 		   FROM package_versions WHERE package_id = ? ORDER BY created_unix ASC`,
 		packageID)
 	if err != nil {
@@ -260,8 +291,8 @@ func (s *Store) ListVersions(ctx context.Context, packageID int64) ([]*Version, 
 	defer rows.Close()
 	var out []*Version
 	for rows.Next() {
-		v := &Version{}
-		if err := rows.Scan(&v.ID, &v.PackageID, &v.Version, &v.LowerVersion, &v.MetadataJSON, &v.CreatedUnix); err != nil {
+		v, err := scanVersion(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -272,18 +303,66 @@ func (s *Store) ListVersions(ctx context.Context, packageID int64) ([]*Version, 
 // GetLatestVersion returns the most-recently-created version of a package.
 func (s *Store) GetLatestVersion(ctx context.Context, packageID int64) (*Version, error) {
 	row := s.DB.QueryRowContext(ctx,
-		`SELECT id, package_id, version, lower_version, metadata_json, created_unix
+		`SELECT `+versionColumns+`
 		   FROM package_versions WHERE package_id = ?
 		   ORDER BY created_unix DESC LIMIT 1`,
 		packageID)
-	v := &Version{}
-	if err := row.Scan(&v.ID, &v.PackageID, &v.Version, &v.LowerVersion, &v.MetadataJSON, &v.CreatedUnix); err != nil {
+	v, err := scanVersion(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrVersionNotExist
 		}
 		return nil, err
 	}
 	return v, nil
+}
+
+// QuarantineVersion marks a version as quarantined: stored but hidden.
+// ruleID may be 0 if the quarantine is operator-initiated.
+func (s *Store) QuarantineVersion(ctx context.Context, versionID, ruleID int64, reason string) error {
+	var ruleArg any
+	if ruleID != 0 {
+		ruleArg = ruleID
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE package_versions
+		    SET quarantine_reason = ?, quarantined_by_rule_id = ?
+		  WHERE id = ?`, reason, ruleArg, versionID)
+	if err != nil {
+		return fmt.Errorf("quarantine version: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrVersionNotExist
+	}
+	return nil
+}
+
+// PromoteVersion clears quarantine on a version.
+func (s *Store) PromoteVersion(ctx context.Context, versionID int64) error {
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE package_versions
+		    SET quarantine_reason = NULL, quarantined_by_rule_id = NULL
+		  WHERE id = ?`, versionID)
+	if err != nil {
+		return fmt.Errorf("promote version: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrVersionNotExist
+	}
+	return nil
+}
+
+// SetLicense records the SPDX license expression for a version.
+func (s *Store) SetLicense(ctx context.Context, versionID int64, license string) error {
+	var arg any
+	if license != "" {
+		arg = license
+	}
+	_, err := s.DB.ExecContext(ctx,
+		`UPDATE package_versions SET license = ? WHERE id = ?`, arg, versionID)
+	return err
 }
 
 // ----- Blobs -----

@@ -78,14 +78,34 @@ func main() {
 		Tenants: tenantStore,
 	}
 
-	// Supply-chain policy engine. Step 1-3 of the plan: a no-op core
-	// engine wrapped with audit logging. Real evaluators land in step 5+.
+	// Supply-chain policy engine. Step 1-4 of the plan: a rule-driven
+	// engine with no evaluators yet registered, plus the audit decorator.
+	// Real evaluators (cooldown, license allowlist) land in steps 5+.
 	auditLogger := audit.New(dbConn, 4096)
 	defer auditLogger.Close()
 	pruneCtx, prunecancel := context.WithCancel(context.Background())
 	defer prunecancel()
 	audit.StartPruner(pruneCtx, dbConn)
-	engine := audit.WrapEngine(policy.NoopEngine{}, auditLogger, tenantStore)
+
+	ruleStore := policy.NewRuleStore(dbConn)
+	if cfg.PolicyFile != "" {
+		syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		n, err := policy.SyncYAMLFile(syncCtx, cfg.PolicyFile, ruleStore, tenantStore)
+		syncCancel()
+		if err != nil {
+			log.Fatalf("policy: load %s: %v", cfg.PolicyFile, err)
+		}
+		log.Printf("policy: loaded %d rule(s) from %s", n, cfg.PolicyFile)
+	}
+	core := policy.NewChainEngine( /* evaluators added in step 5+ */ )
+	if err := core.PullFromStore(context.Background(), ruleStore); err != nil {
+		log.Fatalf("policy: initial rule pull: %v", err)
+	}
+	refreshCtx, refreshCancel := context.WithCancel(context.Background())
+	defer refreshCancel()
+	policy.StartRuleRefresher(refreshCtx, core, ruleStore, 30*time.Second)
+
+	engine := audit.WrapEngine(core, auditLogger, tenantStore)
 
 	r, err := server.New(server.Deps{
 		Service:       svc,
