@@ -23,6 +23,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
+	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 
 	"github.com/gin-gonic/gin"
@@ -34,11 +35,16 @@ type Handler struct {
 	Service *pkgsvc.Service
 	Models  *models.Store
 	Tenants *tenants.Store
+	Engine  policy.Engine
 }
 
-// NewHandler constructs a Handler.
-func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store) *Handler {
-	return &Handler{Service: svc, Models: m, Tenants: ts}
+// NewHandler constructs a Handler. If eng is nil, the no-op engine
+// (allow-everything) is used so the rest of the system stays functional.
+func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store, eng policy.Engine) *Handler {
+	if eng == nil {
+		eng = policy.NoopEngine{}
+	}
+	return &Handler{Service: svc, Models: m, Tenants: ts, Engine: eng}
 }
 
 // Register attaches the Go proxy routes to the given group. The group is
@@ -134,17 +140,21 @@ func (h *Handler) list(c *gin.Context, tenant *tenants.Tenant, module string) {
 		c.String(http.StatusInternalServerError, "%v", err)
 		return
 	}
-	sort.Slice(versions, func(i, j int) bool { return versions[i].CreatedUnix < versions[j].CreatedUnix })
+	visible := h.filterReadable(c, tenant, pkg, versions)
+	sort.Slice(visible, func(i, j int) bool { return visible[i].CreatedUnix < visible[j].CreatedUnix })
 	c.Header("Content-Type", "text/plain; charset=utf-8")
-	for _, v := range versions {
+	for _, v := range visible {
 		fmt.Fprintln(c.Writer, v.Version)
 	}
 }
 
 func (h *Handler) info(c *gin.Context, tenant *tenants.Tenant, module, version string) {
-	_, ver, err := h.resolve(c.Request.Context(), tenant.ID, module, version)
+	pkg, ver, err := h.resolve(c.Request.Context(), tenant.ID, module, version)
 	if err != nil {
 		h.notFoundOrError(c, err)
+		return
+	}
+	if !h.checkRead(c, tenant, pkg, ver, "") {
 		return
 	}
 	c.JSON(http.StatusOK, struct {
@@ -157,9 +167,12 @@ func (h *Handler) info(c *gin.Context, tenant *tenants.Tenant, module, version s
 }
 
 func (h *Handler) mod(c *gin.Context, tenant *tenants.Tenant, module, version string) {
-	_, ver, err := h.resolve(c.Request.Context(), tenant.ID, module, version)
+	pkg, ver, err := h.resolve(c.Request.Context(), tenant.ID, module, version)
 	if err != nil {
 		h.notFoundOrError(c, err)
+		return
+	}
+	if !h.checkRead(c, tenant, pkg, ver, "") {
 		return
 	}
 	goMod, ok, err := h.Models.GetProperty(c.Request.Context(), models.PropertyRefVersion, ver.ID, PropertyGoMod)
@@ -176,7 +189,7 @@ func (h *Handler) mod(c *gin.Context, tenant *tenants.Tenant, module, version st
 }
 
 func (h *Handler) zip(c *gin.Context, tenant *tenants.Tenant, module, version string) {
-	_, ver, err := h.resolve(c.Request.Context(), tenant.ID, module, version)
+	pkg, ver, err := h.resolve(c.Request.Context(), tenant.ID, module, version)
 	if err != nil {
 		h.notFoundOrError(c, err)
 		return
@@ -200,6 +213,9 @@ func (h *Handler) zip(c *gin.Context, tenant *tenants.Tenant, module, version st
 	if f == nil {
 		f = files[0]
 	}
+	if !h.checkRead(c, tenant, pkg, ver, f.Name) {
+		return
+	}
 	rc, _, err := h.Service.OpenFile(c.Request.Context(), f)
 	if err != nil {
 		c.String(http.StatusInternalServerError, "%v", err)
@@ -217,10 +233,22 @@ func (h *Handler) latest(c *gin.Context, tenant *tenants.Tenant, module string) 
 		h.notFoundOrError(c, err)
 		return
 	}
-	ver, err := h.Models.GetLatestVersion(c.Request.Context(), pkg.ID)
+	versions, err := h.Models.ListVersions(c.Request.Context(), pkg.ID)
 	if err != nil {
-		h.notFoundOrError(c, err)
+		c.String(http.StatusInternalServerError, "%v", err)
 		return
+	}
+	visible := h.filterReadable(c, tenant, pkg, versions)
+	if len(visible) == 0 {
+		c.String(http.StatusNotFound, "no readable version")
+		return
+	}
+	// Pick the most-recent readable version.
+	var ver *models.Version
+	for _, v := range visible {
+		if ver == nil || v.CreatedUnix > ver.CreatedUnix {
+			ver = v
+		}
 	}
 	c.JSON(http.StatusOK, struct {
 		Version string    `json:"Version"`
@@ -257,6 +285,11 @@ func (h *Handler) upload(c *gin.Context) {
 		return
 	}
 
+	filename := fmt.Sprintf("%s.zip", pkg.Version)
+	if !h.checkIngest(c, tenant, pkg.Name, pkg.Version, filename) {
+		return
+	}
+
 	_, _, _, err = h.Service.CreatePackageAndAddFile(c.Request.Context(), pkgsvc.CreationInfo{
 		TenantID:    tenant.ID,
 		PackageType: models.TypeGo,
@@ -265,7 +298,7 @@ func (h *Handler) upload(c *gin.Context) {
 		VersionProperties: map[string]string{
 			PropertyGoMod: pkg.GoMod,
 		},
-		Filename: fmt.Sprintf("%s.zip", pkg.Version),
+		Filename: filename,
 		IsLead:   true,
 	}, buf)
 	if err != nil {
@@ -313,3 +346,79 @@ func (h *Handler) notFoundOrError(c *gin.Context, err error) {
 		c.String(http.StatusInternalServerError, "%v", err)
 	}
 }
+
+// --- policy hooks ---
+
+// subjectFor builds a policy Subject for a (package, version, filename) triple.
+func (h *Handler) subjectFor(tenant *tenants.Tenant, pkg *models.Package, ver *models.Version, filename string) policy.Subject {
+	s := policy.Subject{
+		TenantID: tenant.ID,
+		Format:   string(models.TypeGo),
+		Package:  pkg.LowerName,
+		Filename: filename,
+	}
+	if ver != nil {
+		s.Version = ver.Version
+		s.Attrs = map[string]any{
+			"created_unix":       ver.CreatedUnix,
+			"ingest_age_seconds": time.Now().Unix() - ver.CreatedUnix,
+		}
+	}
+	return s
+}
+
+// checkRead applies the policy engine to a single-version read. Returns
+// false (and writes a 403) if the engine returns Quarantine or Deny.
+func (h *Handler) checkRead(c *gin.Context, tenant *tenants.Tenant, pkg *models.Package, ver *models.Version, filename string) bool {
+	r := h.Engine.Evaluate(c.Request.Context(), h.subjectFor(tenant, pkg, ver, filename), policy.ActionRead)
+	if r.IsBlocked() {
+		c.String(http.StatusForbidden, "%s", policyReason(r))
+		return false
+	}
+	return true
+}
+
+// checkIngest applies the policy engine before storing an uploaded artifact.
+// Returns false (and writes a 403) on Deny. Quarantine handling is
+// deferred until storage-side support lands (see plan §11 step 4).
+func (h *Handler) checkIngest(c *gin.Context, tenant *tenants.Tenant, packageName, version, filename string) bool {
+	subj := policy.Subject{
+		TenantID: tenant.ID,
+		Format:   string(models.TypeGo),
+		Package:  strings.ToLower(packageName),
+		Version:  version,
+		Filename: filename,
+		Attrs: map[string]any{
+			"created_unix":       time.Now().Unix(),
+			"ingest_age_seconds": int64(0),
+		},
+	}
+	r := h.Engine.Evaluate(c.Request.Context(), subj, policy.ActionIngest)
+	if r.Decision >= policy.Deny {
+		c.String(http.StatusForbidden, "%s", policyReason(r))
+		return false
+	}
+	return true
+}
+
+// filterReadable returns the subset of versions the engine permits for
+// reading. Quarantined / denied versions are silently omitted.
+func (h *Handler) filterReadable(c *gin.Context, tenant *tenants.Tenant, pkg *models.Package, versions []*models.Version) []*models.Version {
+	out := versions[:0]
+	for _, v := range versions {
+		r := h.Engine.Evaluate(c.Request.Context(), h.subjectFor(tenant, pkg, v, ""), policy.ActionRead)
+		if r.IsBlocked() {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+func policyReason(r policy.Result) string {
+	if r.Reason == "" {
+		return r.Decision.String()
+	}
+	return r.Reason
+}
+

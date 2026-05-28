@@ -18,6 +18,7 @@ import (
 	pkgdb "github.com/astockwell/pkgmirror/internal/db"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
+	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/server"
 	"github.com/astockwell/pkgmirror/internal/storage"
 	"github.com/astockwell/pkgmirror/internal/tenants"
@@ -81,7 +82,11 @@ func main() {
 		Models:        pkgModels,
 		Tenants:       tenantStore,
 		Authenticator: authn,
-		Templates:     assets.Templates(),
+		// Step 1 of the supply-chain policy engine plan: a no-op engine
+		// plumbed through every handler with zero behavior change. Real
+		// evaluators (cooldown, license allowlist) land in later steps.
+		Engine:    policy.NoopEngine{},
+		Templates: assets.Templates(),
 	})
 	if err != nil {
 		log.Fatalf("build server: %v", err)

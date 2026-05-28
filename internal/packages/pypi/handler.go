@@ -23,10 +23,12 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
+	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 
 	"github.com/gin-gonic/gin"
@@ -49,11 +51,15 @@ type Handler struct {
 	Service *pkgsvc.Service
 	Models  *models.Store
 	Tenants *tenants.Store
+	Engine  policy.Engine
 }
 
-// NewHandler constructs a Handler.
-func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store) *Handler {
-	return &Handler{Service: svc, Models: m, Tenants: ts}
+// NewHandler constructs a Handler. If eng is nil, the no-op engine is used.
+func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store, eng policy.Engine) *Handler {
+	if eng == nil {
+		eng = policy.NoopEngine{}
+	}
+	return &Handler{Service: svc, Models: m, Tenants: ts, Engine: eng}
 }
 
 // Register attaches PyPI routes to g (already scoped to
@@ -193,6 +199,10 @@ func (h *Handler) upload(c *gin.Context) {
 		}
 	}
 
+	if !h.checkIngest(c, tenant, lookupName, rawVersion, fh.Filename, c.Request.FormValue("license")) {
+		return
+	}
+
 	_, _, _, err = h.Service.CreatePackageOrAddFileToExisting(c.Request.Context(), pkgsvc.CreationInfo{
 		TenantID:          tenant.ID,
 		PackageType:       models.TypePyPI,
@@ -234,6 +244,9 @@ func (h *Handler) rootIndex(c *gin.Context) {
 
 	rows := make([]struct{ Name, URL string }, 0, len(pkgs))
 	for _, p := range pkgs {
+		if !h.hasAnyReadableVersion(c, tenant, p) {
+			continue
+		}
 		rows = append(rows, struct{ Name, URL string }{
 			Name: p.Name,
 			URL:  "./" + p.LowerName + "/",
@@ -276,6 +289,7 @@ func (h *Handler) packageIndex(c *gin.Context) {
 	sort.Slice(versions, func(i, j int) bool {
 		return strings.Compare(versions[i].Version, versions[j].Version) < 0
 	})
+	versions = h.filterReadableVersions(c, tenant, pkg, versions)
 
 	type fileEntry struct {
 		Filename       string
@@ -376,6 +390,9 @@ func (h *Handler) download(c *gin.Context) {
 		c.String(http.StatusNotFound, "no such file")
 		return
 	}
+	if !h.checkRead(c, tenant, pkg, ver, match.Name) {
+		return
+	}
 	rc, _, err := h.Service.OpenFile(c.Request.Context(), match)
 	if err != nil {
 		c.String(http.StatusInternalServerError, "%v", err)
@@ -462,6 +479,97 @@ type jsonPackage struct {
 	Meta     jsonMeta   `json:"meta"`
 	Versions []string   `json:"versions"`
 	Files    []jsonFile `json:"files"`
+}
+
+// --- Policy hooks ----------------------------------------------------------
+
+// subjectFor builds a Subject for one (package, version, filename) triple.
+func (h *Handler) subjectFor(tenant *tenants.Tenant, pkg *models.Package, ver *models.Version, filename, license string) policy.Subject {
+	s := policy.Subject{
+		TenantID: tenant.ID,
+		Format:   string(models.TypePyPI),
+		Package:  pkg.LowerName,
+		Filename: filename,
+	}
+	if ver != nil {
+		s.Version = ver.Version
+		s.Attrs = map[string]any{
+			"created_unix":       ver.CreatedUnix,
+			"ingest_age_seconds": time.Now().Unix() - ver.CreatedUnix,
+		}
+		if license != "" {
+			s.Attrs["license"] = license
+		}
+	}
+	return s
+}
+
+func (h *Handler) checkRead(c *gin.Context, tenant *tenants.Tenant, pkg *models.Package, ver *models.Version, filename string) bool {
+	r := h.Engine.Evaluate(c.Request.Context(), h.subjectFor(tenant, pkg, ver, filename, ""), policy.ActionRead)
+	if r.IsBlocked() {
+		c.String(http.StatusForbidden, "%s", policyReason(r))
+		return false
+	}
+	return true
+}
+
+func (h *Handler) checkIngest(c *gin.Context, tenant *tenants.Tenant, lookupName, version, filename, license string) bool {
+	subj := policy.Subject{
+		TenantID: tenant.ID,
+		Format:   string(models.TypePyPI),
+		Package:  lookupName,
+		Version:  version,
+		Filename: filename,
+		Attrs: map[string]any{
+			"created_unix":       time.Now().Unix(),
+			"ingest_age_seconds": int64(0),
+		},
+	}
+	if license != "" {
+		subj.Attrs["license"] = license
+	}
+	r := h.Engine.Evaluate(c.Request.Context(), subj, policy.ActionIngest)
+	if r.Decision >= policy.Deny {
+		c.String(http.StatusForbidden, "%s", policyReason(r))
+		return false
+	}
+	return true
+}
+
+func (h *Handler) filterReadableVersions(c *gin.Context, tenant *tenants.Tenant, pkg *models.Package, versions []*models.Version) []*models.Version {
+	out := versions[:0]
+	for _, v := range versions {
+		r := h.Engine.Evaluate(c.Request.Context(), h.subjectFor(tenant, pkg, v, "", ""), policy.ActionRead)
+		if r.IsBlocked() {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// hasAnyReadableVersion reports whether at least one version of pkg passes
+// the policy for ActionRead. Used to hide a package from the root index
+// when all its versions are quarantined/denied.
+func (h *Handler) hasAnyReadableVersion(c *gin.Context, tenant *tenants.Tenant, pkg *models.Package) bool {
+	versions, err := h.Models.ListVersions(c.Request.Context(), pkg.ID)
+	if err != nil || len(versions) == 0 {
+		return false
+	}
+	for _, v := range versions {
+		r := h.Engine.Evaluate(c.Request.Context(), h.subjectFor(tenant, pkg, v, "", ""), policy.ActionRead)
+		if !r.IsBlocked() {
+			return true
+		}
+	}
+	return false
+}
+
+func policyReason(r policy.Result) string {
+	if r.Reason == "" {
+		return r.Decision.String()
+	}
+	return r.Reason
 }
 
 // --- Inline HTML templates -------------------------------------------------

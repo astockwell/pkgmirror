@@ -13,6 +13,7 @@ import (
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
 	"github.com/astockwell/pkgmirror/internal/packages/goproxy"
 	"github.com/astockwell/pkgmirror/internal/packages/pypi"
+	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/ui"
 
@@ -25,11 +26,18 @@ type Deps struct {
 	Models        *models.Store
 	Tenants       *tenants.Store
 	Authenticator auth.Authenticator
-	Templates     fs.FS
+	// Engine is the supply-chain policy engine. If nil, defaults to
+	// policy.NoopEngine{} (allow-everything).
+	Engine    policy.Engine
+	Templates fs.FS
 }
 
 // New constructs a configured *gin.Engine.
 func New(d Deps) (*gin.Engine, error) {
+	if d.Engine == nil {
+		d.Engine = policy.NoopEngine{}
+	}
+
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 	r.Use(auth.Middleware(d.Authenticator))
@@ -44,10 +52,10 @@ func New(d Deps) (*gin.Engine, error) {
 
 	// Format-specific API groups: /api/packages/:tenant/<format>/...
 	goGroup := r.Group("/api/packages/:tenant/go")
-	goproxy.NewHandler(d.Service, d.Models, d.Tenants).Register(goGroup)
+	goproxy.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(goGroup)
 
 	pypiGroup := r.Group("/api/packages/:tenant/pypi")
-	pypi.NewHandler(d.Service, d.Models, d.Tenants).Register(pypiGroup)
+	pypi.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(pypiGroup)
 
 	ui.New(d.Service, d.Models, d.Tenants).Register(r)
 
