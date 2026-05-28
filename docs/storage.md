@@ -9,9 +9,10 @@ must conform to.
 
 The interface and the `LocalStorage` implementation are direct ports of
 [`forgejo/modules/storage`](https://codeberg.org/forgejo/forgejo/src/branch/forgejo/modules/storage)
-(MIT). The architectural decision and the rationale are recorded in
-[DECISIONS.md](../DECISIONS.md) (2026-05-28); this doc is the
-operator- and contributor-facing version of the same material.
+(MIT). Forgejo's `ObjectStorage` has been through years of production
+use across LFS, packages, avatars, and attachments with both filesystem
+and cloud backends — we adopt it verbatim so the next backend is a
+port job rather than a redesign.
 
 ---
 
@@ -122,28 +123,6 @@ Plus two sentinels:
   `os.Rename`; S3-style backends get atomicity from `PutObject`.
 - **Immutable.** There is no `Update`. A given key's bytes are forever
   those bytes; if they change, the key changes.
-
-### Why the interface looks like this (vs. my first draft)
-
-The first cut of this package was three methods — `Put` / `Open` /
-`Delete` — and it was filesystem-shaped. The five gaps that surfaced
-the moment we started thinking about a cloud backend:
-
-1. `Put` didn't take `size`. S3 multipart wants known size up front.
-2. There was no standalone `Stat`. Backends couldn't answer "how big"
-   without opening the body and reading to EOF.
-3. The returned reader was `io.ReadSeekCloser`, not an Object with
-   `Stat()`. S3 `GetObject` doesn't naturally satisfy `Seek`; without
-   `Stat()` you also can't set `Content-Length` from the open reader.
-4. No `URL()` hook. Big-blob pulls (especially OCI layers) want 307
-   pre-signed redirects so the body never streams through the
-   registry; without it in the interface, we'd have to bolt it on
-   later as a non-interface-compatible escape hatch.
-5. No iterator. Orphan-blob GC is impossible without one.
-
-Forgejo has been through every one of these. The current interface
-adopts their shape verbatim so the next backend is a port job, not a
-redesign.
 
 ---
 
@@ -419,9 +398,6 @@ pkgmirror.
 
 ## See also
 
-- [DECISIONS.md](../DECISIONS.md) (2026-05-28) — the decision log entry
-  for adopting Forgejo's `ObjectStorage` shape, with the field-by-field
-  mapping from the old `Backend` interface.
 - [`forgejo/modules/storage`](https://codeberg.org/forgejo/forgejo/src/branch/forgejo/modules/storage)
   — the upstream reference. Our `LocalStorage` is a transliteration
   with sharding added; a future `S3` / `MinIO` backend would be a
