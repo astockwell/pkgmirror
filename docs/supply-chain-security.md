@@ -71,6 +71,11 @@ We should assume pull-through is on the roadmap. Everything below assumes "at in
 | **Per-token per-tenant rate limits + WAF-style anomaly detection on pulls** | "Build bot X normally pulls 50 deps; today it tried 500" → 429 + alert. | Catches build-machine compromise. | New code; uses our existing token model |
 | **Token-based pull attribution** | Every pull is tagged with the token's owner (user_id) — we get this almost for free from our auth model. | Powers the "who used the bad version" query. | Audit-log addition |
 
+## Other Ideas
+
+- Per-package risk scores & tailored/sliding windows of e.g. cooldown periods, or approvals required.
+- Per-package version blacklisting (e.g. "requests 1.2.3 is vulnerable, block it even if it's old.")
+
 ## What to build first (rough order)
 
 A pragmatic v1 corporate posture, ordered by **value × ease**:
@@ -94,12 +99,3 @@ Everything else (license, SBOM, typosquat detection, scheduled re-scan, velocity
 - **The mirror's outbound HTTP client is part of the attack surface.** Pin upstream TLS roots; use a small allowlist of upstream registries; consider mTLS to those.
 - **Reproducibility is a security feature.** Refusing re-uploads of an existing `(name, version)` (which we already do) is what makes a 7-day cooldown meaningful — otherwise the attacker just replaces the bytes.
 - **"Pull-through cache vs. mirror" is a UX decision with security implications.** A "cache only what's been explicitly approved" mode (vs. "fetch on miss") is the strongest posture but the most operational burden. Both should be tenant-level options.
-
----
-
-Want me to:
-1. **Pick one and implement it** — my recommendation would be cooldowns (your idea, high impact, fits cleanly with what's already there), OR
-2. **Sketch a "supply-chain" design doc** in `docs/` that picks a coherent v1 set and shows how they compose, OR
-3. **Add the audit-log foundation first** — least exciting but everything else needs it.
-
-Or something else from the list above.
