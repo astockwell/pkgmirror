@@ -479,6 +479,14 @@ func (h *Handler) lookupFile(ctx context.Context, tenantID int64, branch, repo, 
 // loadIndexEntries gathers the index input rows for one coordinate.
 // Returns nil (not error) when the repo is empty so callers can
 // distinguish "no signing required" from a true DB failure.
+//
+// We drain the join cursor fully before issuing any per-file property
+// lookups. Nesting a second query inside `rows.Next()` will eventually
+// hit `database is locked (SQLITE_BUSY)` under concurrency — the
+// modernc.org/sqlite driver holds a connection per active iterator
+// and a sibling query can race a writer (e.g. the previous test's
+// upload, which is still being checkpointed by WAL). Draining first
+// frees the connection so the property fetches reuse it serially.
 func (h *Handler) loadIndexEntries(ctx context.Context, tenantID int64, branch, repo, arch string) ([]*indexEntry, error) {
 	prefix := branch + "|" + repo + "|" + arch + "|"
 	rows, err := h.Models.DB.QueryContext(ctx, `
@@ -498,9 +506,12 @@ func (h *Handler) loadIndexEntries(ctx context.Context, tenantID int64, branch, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	var out []*indexEntry
+	type pending struct {
+		fileID int64
+		entry  *indexEntry
+	}
+	var pendings []pending
 	for rows.Next() {
 		var (
 			f models.File
@@ -514,29 +525,34 @@ func (h *Handler) loadIndexEntries(ctx context.Context, tenantID int64, branch, 
 			&v.ID, &v.Version, &v.MetadataJSON,
 			&b.ID, &b.Size, &b.HashMD5, &b.HashSHA1, &b.HashSHA256, &b.HashSHA512,
 		); err != nil {
+			rows.Close()
 			return nil, err
 		}
-
-		entry := &indexEntry{
-			pkg:  &p,
-			ver:  &v,
-			blob: &b,
-		}
+		entry := &indexEntry{pkg: &p, ver: &v, blob: &b}
 		if v.MetadataJSON != "" {
 			_ = json.Unmarshal([]byte(v.MetadataJSON), &entry.verMeta)
 		}
+		pendings = append(pendings, pending{fileID: f.ID, entry: entry})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
 
-		raw, hasMeta, err := h.Models.GetProperty(ctx, models.PropertyRefFile, f.ID, PropertyMetadata)
+	// Cursor is closed; safe to issue per-file property lookups.
+	out := make([]*indexEntry, 0, len(pendings))
+	for _, p := range pendings {
+		raw, hasMeta, err := h.Models.GetProperty(ctx, models.PropertyRefFile, p.fileID, PropertyMetadata)
 		if err != nil {
 			return nil, err
 		}
 		if hasMeta && raw != "" {
-			_ = json.Unmarshal([]byte(raw), &entry.fileMd)
+			_ = json.Unmarshal([]byte(raw), &p.entry.fileMd)
 		}
-		out = append(out, entry)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		out = append(out, p.entry)
 	}
 	return out, nil
 }

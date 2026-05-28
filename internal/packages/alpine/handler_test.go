@@ -22,6 +22,7 @@ import (
 	pkgdb "github.com/astockwell/pkgmirror/internal/db"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
+	"github.com/astockwell/pkgmirror/internal/packages/alpine"
 	"github.com/astockwell/pkgmirror/internal/server"
 	"github.com/astockwell/pkgmirror/internal/storage"
 	"github.com/astockwell/pkgmirror/internal/tenants"
@@ -30,6 +31,20 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// TestMain shrinks the per-tenant RSA signing key from 4096 to 2048
+// bits for the duration of the test process. 4096-bit RSA generation
+// takes ~700ms on a quiet laptop and several seconds under heavy
+// parallel load (`go test ./...` running 13 packages simultaneously),
+// which led to occasional 5s+ APKINDEX-build requests flaking the
+// "VersionMetadataPersisted" regression test. 2048 keeps the
+// cryptographic flow byte-for-byte identical (same algorithm, same
+// signature format, same fingerprint encoding) while making the whole
+// suite predictable. Production wiring is untouched.
+func TestMain(m *testing.M) {
+	alpine.DefaultRSAKeyBits = 2048
+	os.Exit(m.Run())
+}
 
 // fixture wires the full HTTP stack the same way the other format
 // grey-box suites do. We don't try to mock at the handler level —

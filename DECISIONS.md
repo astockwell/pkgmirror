@@ -85,6 +85,38 @@ index format and signature is what matters for "this looks like a
 real Alpine mirror"; `apk add` of an arbitrary upstream package is
 an integration test for `apk` itself, not for our index.
 
+**Two flake-shaped bugs caught by the 10× stress loop after initial
+commit:**
+
+1. *Missing tar body padding in the signature stream.* The original
+   `writeGzipStream` ported verbatim from forgejo wrote
+   `tar.WriteHeader` + `tar.Write` but never called `Flush` or
+   `Close` when `addTarEnd=false`. Go's `tar.Writer` only pads the
+   body to a 512-byte block boundary on the next `WriteHeader` or
+   `Close`, so the signature stream was technically malformed (body
+   ended at byte 512+N instead of a 512-byte boundary). Real `apk`
+   tolerates it because it reads the signature by explicit byte
+   count and never seeks past it, but any reader walking the
+   concatenated tars fails. This was completely masked when the
+   signature was 512 bytes (4096-bit RSA → no padding needed); it
+   only surfaced when we ran tests with 2048-bit keys for speed.
+   Fix: always `Flush()` when not closing.
+
+2. *Nested DB query inside an open cursor → SQLITE_BUSY under
+   load.* `loadIndexEntries` iterated `rows.Next()` on a join cursor
+   and called `Models.GetProperty()` per row to fetch the
+   `alpine.metadata` property. With the modernc.org/sqlite driver a
+   second query while a cursor is active can race writers from a
+   sibling test and stall on the per-file lock until the 5-second
+   busy timeout. Fix: drain the cursor into a slice first, close
+   it, then issue per-row property fetches against a free
+   connection. Same pattern any future format with nested-lookup
+   indices should follow.
+
+Both bugs only manifested when the suite was run under `go test
+./...` parallel load on a saturated CPU — exactly the condition CI
+runs in. A 10×-rerun loop on the full suite is now green.
+
 ---
 
 ## 2026-05-28 — Generic format (sixth format landed)

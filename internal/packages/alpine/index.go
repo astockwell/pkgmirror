@@ -38,9 +38,13 @@ const (
 	IndexArchiveFilename = "APKINDEX.tar.gz"
 )
 
-// defaultRSAKeyBits matches forgejo's choice. Tests may use a smaller
-// size by calling GenerateKeyPair directly.
-const defaultRSAKeyBits = 4096
+// DefaultRSAKeyBits is the default RSA key length used for signing the
+// APKINDEX when a Handler.RSAKeyBits isn't set. 4096 matches forgejo
+// and is what we ship in production. Tests override this from
+// TestMain to 2048 because the per-fixture key generation otherwise
+// dominates suite wall time and can time out under heavy parallel
+// `go test ./...` load on slow CI runners.
+var DefaultRSAKeyBits = 4096
 
 // indexEntry is the per-package row materialised from DB lookups before
 // we serialise to APKINDEX text format.
@@ -168,15 +172,26 @@ func writeIndexEntry(w *bytes.Buffer, e *indexEntry) {
 // (standard archive end). For detached signature streams apk wants the
 // tar trailer omitted so the next stream concatenates cleanly.
 //
-// Ported from forgejo/services/packages/alpine/repository.go.
+// We always call tw.Flush() (when not Closing) to write the body's
+// trailing 512-byte-block padding. tar.Writer only pads implicitly on
+// WriteHeader-of-next-entry or Close; without one of those, a body of
+// size N produces a stream of exactly 512+N bytes — missing the
+// padding-to-block-boundary that the tar format requires. apk happens
+// to tolerate this because it reads the signature body by explicit
+// byte count and never seeks past it, but the bytes are still
+// technically malformed and break any reader that *does* try to walk
+// the concatenated tars (our test helper, downstream tools, etc.).
+// This was masked by 4096-bit RSA keys (512-byte signature = exactly
+// one tar block, no padding needed) and surfaced only when we tried
+// 2048-bit keys in tests.
+//
+// Ported from forgejo/services/packages/alpine/repository.go, with the
+// Flush() fix applied on top.
 func writeGzipStream(w io.Writer, filename string, content []byte, addTarEnd bool) error {
 	zw := gzip.NewWriter(w)
 	defer zw.Close()
 
 	tw := tar.NewWriter(zw)
-	if addTarEnd {
-		defer tw.Close()
-	}
 	if err := tw.WriteHeader(&tar.Header{
 		Name: filename,
 		Mode: 0o600,
@@ -187,7 +202,13 @@ func writeGzipStream(w io.Writer, filename string, content []byte, addTarEnd boo
 	if _, err := tw.Write(content); err != nil {
 		return err
 	}
-	return nil
+	if addTarEnd {
+		// Close writes body padding + two trailing zero blocks.
+		return tw.Close()
+	}
+	// Flush writes body padding only. No trailing zero blocks, so
+	// the next gzip stream's tar can be concatenated cleanly.
+	return tw.Flush()
 }
 
 // GenerateKeyPair builds a fresh RSA keypair encoded as PEM strings,
@@ -196,7 +217,7 @@ func writeGzipStream(w io.Writer, filename string, content []byte, addTarEnd boo
 // "PUBLIC KEY". apk validates against PKIX-encoded public keys.
 func GenerateKeyPair(bits int) (privatePEM, publicPEM string, err error) {
 	if bits == 0 {
-		bits = defaultRSAKeyBits
+		bits = DefaultRSAKeyBits
 	}
 	priv, err := rsa.GenerateKey(rand.Reader, bits)
 	if err != nil {
