@@ -5,6 +5,68 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-27 — npm format (third format landed)
+
+**Decision:** Implement npm as the third package format, mounted at
+`/api/packages/:tenant/npm`. Routes:
+
+- `PUT  /:name`, `PUT  /@:scope/:name` — publish (single JSON document with base64 tarball)
+- `GET  /:name`, `GET  /@:scope/:name` — packument
+- `GET  /:name/-/:filename`, `GET  /@:scope/:name/-/:filename` — tarball download
+- `GET  /-/package/:name/dist-tags` (+ scoped) — list dist-tags
+- `PUT  /-/package/:name/dist-tags/:tag` (+ scoped) — set dist-tag
+- `DELETE /-/package/:name/dist-tags/:tag` (+ scoped) — remove dist-tag
+
+Parser modeled on `forgejo/modules/packages/npm/creator.go` (MIT). The
+publish handler is structurally similar to Forgejo's, but uses the
+pkgmirror service layer (`Service.CreatePackageAndAddFile`) and our
+content-addressed blob storage.
+
+**Scoped routing:** Gin's path parameters can't express `@scope/name` as a
+single segment, so each route is registered twice — once unscoped
+(`/:name`) and once scoped (`/@:scope/:name`). A `packageNameFromParams`
+helper reassembles `@scope/name` from the two params at the top of every
+handler. This costs us a few extra route registrations but keeps the rest
+of the handler logic identical to the unscoped case.
+
+**Dist-tags:** Stored as per-version `package_properties` rows keyed
+`npm.tag.<tagname>` so a version can carry any number of tags
+simultaneously and tags can be moved by deleting from the old version and
+inserting on the new one. The `npm publish` body sets `dist-tags.latest`
+on every publish — we honor that as a property on the published version,
+which means listing dist-tags re-aggregates across all versions of the
+package. (Alternatives considered: a per-package `dist_tags` JSON column;
+rejected because it would race the multi-version write path and require
+a new schema migration.)
+
+**Single tarball per version:** Unlike PyPI (which has many files per
+version — sdist + N wheels), npm uploads exactly one tarball per
+`name@version`. We use `Service.CreatePackageAndAddFile` (the same path
+used by goproxy), not the PyPI multi-file path.
+
+**Lookup name:** `strings.ToLower(name)`. npm package names are already
+constrained to be lowercase per the validation rules, but ToLower is
+defensive in case clients send mixed case for scopes (`@Acme/Foo`).
+
+**Integrity verification:** The `dist.integrity` field on every publish
+is a Subresource Integrity (SRI) string. We recompute `sha512` of the
+decoded attachment and reject the upload with 400 if it doesn't match.
+This catches both transit corruption and malicious tampering of the
+attached tarball before it ever touches blob storage.
+
+**Semver dependency:** Added `github.com/hashicorp/go-version` for
+version comparison/sorting in the packument view. Considered writing a
+minimal semver parser by hand but the edge cases (pre-release ordering,
+build metadata, `1.10.0` vs `1.2.0` numeric vs lexicographic) aren't
+worth re-deriving when there's a mature library.
+
+**What I'd revisit:** the npm protocol has a deprecated `_revisions`
+mechanism for safe concurrent updates; we ignore it for now since no
+modern client requires it. If we ever support a UI-driven "unpublish"
+flow we'll need to plumb it through.
+
+---
+
 ## 2026-05-27 — PyPI format (second format landed)
 
 **Decision:** Implement PyPI as the second package format. Three endpoints:

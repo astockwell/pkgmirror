@@ -17,6 +17,7 @@ type Type string
 const (
 	TypeGo   Type = "go"
 	TypePyPI Type = "pypi"
+	TypeNpm  Type = "npm"
 )
 
 // PropertyRefType identifies the entity a property is attached to.
@@ -544,6 +545,56 @@ func (s *Store) GetProperty(ctx context.Context, refType PropertyRefType, refID 
 		return "", false, err
 	}
 	return v, true, nil
+}
+
+// GetPropertiesByPrefix returns every (name, value) property attached to
+// (refType, refID) whose name starts with prefix. Used by the npm
+// dist-tag machinery (per-version properties keyed "npm.tag.<tag>").
+func (s *Store) GetPropertiesByPrefix(ctx context.Context, refType PropertyRefType, refID int64, prefix string) ([]Property, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT id, ref_type, ref_id, name, value
+		   FROM package_properties
+		  WHERE ref_type = ? AND ref_id = ? AND name LIKE ? || '%'`,
+		int(refType), refID, prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Property
+	for rows.Next() {
+		var p Property
+		var rt int
+		if err := rows.Scan(&p.ID, &rt, &p.RefID, &p.Name, &p.Value); err != nil {
+			return nil, err
+		}
+		p.RefType = PropertyRefType(rt)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// DeleteProperty removes a single (refType, refID, name) property if
+// present. Missing rows are not an error.
+func (s *Store) DeleteProperty(ctx context.Context, refType PropertyRefType, refID int64, name string) error {
+	_, err := s.DB.ExecContext(ctx,
+		`DELETE FROM package_properties WHERE ref_type = ? AND ref_id = ? AND name = ?`,
+		int(refType), refID, name)
+	return err
+}
+
+// GetBlobByID fetches a blob row by primary key.
+func (s *Store) GetBlobByID(ctx context.Context, id int64) (*Blob, error) {
+	row := s.DB.QueryRowContext(ctx,
+		`SELECT id, size, hash_md5, hash_sha1, hash_sha256, hash_sha512, created_unix
+		   FROM package_blobs WHERE id = ?`, id)
+	b := &Blob{}
+	if err := row.Scan(&b.ID, &b.Size, &b.HashMD5, &b.HashSHA1, &b.HashSHA256, &b.HashSHA512, &b.CreatedUnix); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrBlobNotExist
+		}
+		return nil, err
+	}
+	return b, nil
 }
 
 // isUniqueViolation returns true if err corresponds to a SQLite UNIQUE

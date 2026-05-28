@@ -13,8 +13,8 @@ Roadmap (from `pkgmirror-spec.md`):
 
 - [x] Go module proxy (`go`)
 - [x] PyPI (`pypi`) — wheel + sdist upload, PEP 503 simple index, PEP 691 JSON
+- [x] npm (`npm`) — publish, packument, tarball download, dist-tags, scoped packages
 - [ ] Generic
-- [ ] npm
 - [ ] Maven
 - [ ] Container (OCI)
 - [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, RubyGems, Swift, RPM, Debian, Alpine, ALT, Arch, CRAN, Vagrant, Chef
@@ -103,6 +103,47 @@ pip install \
 `pip` accepts in-URL Basic-auth credentials and `.netrc` over plain HTTP
 — unlike `go`, which refuses anything but HTTPS.
 
+## Using the npm registry
+
+Point `npm` at the mirror with a per-tenant `.npmrc`. The trailing slash on
+the registry URL is required by `npm`:
+
+```sh
+cat > ~/.npmrc <<EOF
+registry=http://localhost:8080/api/packages/default/npm/
+//localhost:8080/api/packages/default/npm/:_authToken=$PKGMIRROR_ADMIN_TOKEN
+EOF
+```
+
+Publish a package the normal way — `npm publish` sends a single JSON
+document with a base64-encoded tarball, and the mirror verifies the SRI
+`integrity` field before storing:
+
+```sh
+cd my-package
+npm publish
+```
+
+Install it from a consumer project:
+
+```sh
+npm install my-package
+npm install @acme/widget        # scoped packages route via /@scope/name
+```
+
+Dist-tags use the standard `npm` CLI:
+
+```sh
+npm dist-tag add my-package@1.2.3 beta
+npm dist-tag ls my-package
+npm dist-tag rm my-package beta
+```
+
+Unlike `go`, `npm` is happy with token auth over plain HTTP via
+`_authToken`, so no TLS termination is required for development. The
+auth gate is identical to the other formats — see
+[`docs/auth.md`](docs/auth.md).
+
 ## Project layout
 
 ```
@@ -113,6 +154,8 @@ internal/models/      DB models + queries
 internal/storage/     content-addressed blob storage on the filesystem
 internal/packages/    format-agnostic service layer (create package + file)
   goproxy/            Go module proxy parser + HTTP handlers
+  pypi/               PyPI parser + HTTP handlers
+  npm/                npm parser + HTTP handlers
 internal/server/      Gin router + middleware
 internal/ui/          Bootstrap-based HTML UI
 templates/            html/template files

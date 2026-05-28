@@ -46,6 +46,7 @@ jobs:
           images=(
             golang:1.22-bookworm
             python:3.12-slim
+            node:22-bookworm
           )
           for img in "${images[@]}"; do
             docker pull "$img" &

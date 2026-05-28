@@ -14,6 +14,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
 	"github.com/astockwell/pkgmirror/internal/packages/goproxy"
+	"github.com/astockwell/pkgmirror/internal/packages/npm"
 	"github.com/astockwell/pkgmirror/internal/packages/pypi"
 	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
@@ -63,6 +64,9 @@ func New(d Deps) (*gin.Engine, error) {
 
 	pypiGroup := r.Group("/api/packages/:tenant/pypi")
 	pypi.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(pypiGroup)
+
+	npmGroup := r.Group("/api/packages/:tenant/npm")
+	npm.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(npmGroup)
 
 	if d.Rules != nil {
 		(&admin.Handler{
