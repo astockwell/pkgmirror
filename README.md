@@ -17,8 +17,9 @@ Roadmap (from `pkgmirror-spec.md`):
 - [x] RubyGems (`rubygems`) — `gem push` / `gem install`, compact index, legacy specs.4.8.gz, yank
 - [x] Container / OCI (`container`) — OCI distribution v1.1: manifests, blobs (monolithic + chunked), tags, token-exchange auth dance
 - [x] Generic (`generic`) — PUT/GET/DELETE arbitrary blobs at `<name>/<version>/<filename>`
+- [x] Alpine (`alpine`) — `apk add` / `apk update`, signed APKINDEX.tar.gz, per-tenant RSA key
 - [ ] Maven
-- [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, Swift, RPM, Debian, Alpine, ALT, Arch, CRAN, Vagrant, Chef
+- [ ] Cargo, Composer, Conan, Conda, Helm, NuGet, Pub, Swift, RPM, Debian, ALT, Arch, CRAN, Vagrant, Chef
 
 ## Quickstart
 
@@ -282,6 +283,58 @@ are allowed per version (think `linux-amd64.tar.gz` +
 `v1.0.0`). Deleting the last file in a version automatically removes
 the version row too.
 
+## Using the Alpine (apk) registry
+
+Alpine repos live at `<branch>/<repository>/<architecture>/`, mirroring
+the layout `apk` expects in `/etc/apk/repositories`. pkgmirror generates
+a per-tenant RSA signing keypair on first request and signs every
+APKINDEX.tar.gz with it, so plain `apk update` (no `--allow-untrusted`)
+works once the public key is installed:
+
+```sh
+# Install the tenant's public key into /etc/apk/keys/
+curl -fsS -H "Authorization: Bearer $PKGMIRROR_ADMIN_TOKEN" \
+    -o /etc/apk/keys/pkgmirror.rsa.pub \
+    http://localhost:8080/api/packages/default/alpine/key
+
+# Add the repo
+echo "http://localhost:8080/api/packages/default/alpine/v3.20/main" \
+    >> /etc/apk/repositories
+
+# Now the standard workflow works
+apk update
+apk search mypackage
+apk add mypackage
+```
+
+Publish a `.apk` with `PUT`. The branch (e.g. `v3.20`) and repository
+(e.g. `main`, `community`) come from the path; the architecture is
+parsed out of the `.apk`'s `.PKGINFO`:
+
+```sh
+curl -fsS -X PUT \
+    -H "Authorization: Bearer $PKGMIRROR_ADMIN_TOKEN" \
+    --data-binary @./mypackage-1.0.0.apk \
+    http://localhost:8080/api/packages/default/alpine/v3.20/main
+```
+
+A `.apk` whose `PKGINFO` advertises `arch = noarch` is fanned out across
+every architecture the repository already has, falling back to `x86_64`
+if the repo is empty — same semantics as forgejo and a stock alpine
+mirror. Delete a single file:
+
+```sh
+curl -fsS -X DELETE \
+    -H "Authorization: Bearer $PKGMIRROR_ADMIN_TOKEN" \
+    http://localhost:8080/api/packages/default/alpine/v3.20/main/x86_64/mypackage-1.0.0.apk
+```
+
+Each tenant's signing key is generated lazily and stored as a property
+on a synthetic `_alpine` package row. Rotating keys is currently a
+manual SQL operation; a `/key/rotate` endpoint is on the roadmap once
+we settle on a key-rollover UX that doesn't break already-installed
+clients.
+
 ## Project layout
 
 ```
@@ -297,6 +350,7 @@ internal/packages/    format-agnostic service layer (create package + file)
   rubygems/           RubyGems parser + Ruby Marshal encoder + HTTP handlers
   container/          OCI manifest parser + blob upload tracker + /v2/ handlers
   generic/            Pass-through PUT/GET/DELETE handlers, no parser
+  alpine/             .apk PKGINFO parser + APKINDEX.tar.gz builder + RSA signing
 internal/server/      Gin router + middleware
 internal/ui/          Bootstrap-based HTML UI
 templates/            html/template files

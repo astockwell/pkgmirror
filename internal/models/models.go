@@ -21,6 +21,7 @@ const (
 	TypeRubyGems  Type = "rubygems"
 	TypeContainer Type = "container"
 	TypeGeneric   Type = "generic"
+	TypeAlpine    Type = "alpine"
 )
 
 // PropertyRefType identifies the entity a property is attached to.

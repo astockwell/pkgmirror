@@ -13,6 +13,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
+	"github.com/astockwell/pkgmirror/internal/packages/alpine"
 	"github.com/astockwell/pkgmirror/internal/packages/container"
 	"github.com/astockwell/pkgmirror/internal/packages/generic"
 	"github.com/astockwell/pkgmirror/internal/packages/goproxy"
@@ -76,6 +77,9 @@ func New(d Deps) (*gin.Engine, error) {
 
 	genericGroup := r.Group("/api/packages/:tenant/generic")
 	generic.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(genericGroup)
+
+	alpineGroup := r.Group("/api/packages/:tenant/alpine")
+	alpine.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(alpineGroup)
 
 	// Container (OCI) lives at the root /v2/... per the OCI distribution
 	// spec; clients don't tolerate a path prefix. Tenant is the first

@@ -581,13 +581,13 @@ RHEL / Fedora / Rocky / Alma packages.
 
 | Format | Difficulty | Forgejo parser path | Black-box image |
 | --- | --- | --- | --- |
-| generic | trivial | — | `curlimages/curl:8.10.1` |
-| go | easy ✓ done | `modules/packages/goproxy/` | `golang:1.22-bookworm` |
+| generic ✓ done | trivial | — | `curlimages/curl:8.10.1` |
+| go ✓ done | easy | `modules/packages/goproxy/` | `golang:1.22-bookworm` |
 | helm | low | `modules/packages/helm/` | `alpine/helm:3.16` |
 | pub | low | `modules/packages/pub/` | `dart:3.5` |
 | swift | low | `modules/packages/swift/` | `swift:5.10` |
-| npm | moderate | `modules/packages/npm/` | `node:22-bookworm` |
-| pypi | moderate | `modules/packages/pypi/` | `python:3.12-slim` |
+| npm ✓ done | moderate | `modules/packages/npm/` | `node:22-bookworm` |
+| pypi ✓ done | moderate | `modules/packages/pypi/` | `python:3.12-slim` |
 | maven | moderate | `modules/packages/maven/` | `maven:3.9-eclipse-temurin-21` |
 | composer | moderate | `modules/packages/composer/` | `composer:2` |
 | cargo | moderate | `modules/packages/cargo/` | `rust:1.81-bookworm` |
@@ -595,15 +595,15 @@ RHEL / Fedora / Rocky / Alma packages.
 | cran | moderate | `modules/packages/cran/` | `r-base:4.4` |
 | conda | moderate | `modules/packages/conda/` | `continuumio/miniconda3` |
 | vagrant | moderate | `modules/packages/vagrant/` | `hashicorp/vagrant:latest` |
-| alpine | moderate-high | `modules/packages/alpine/` | `alpine:3.20` |
+| alpine ✓ done | moderate-high | `modules/packages/alpine/` | `alpine:3.20` |
 | debian | moderate-high | `modules/packages/debian/` | `debian:bookworm-slim` |
 | rpm | high | `modules/packages/rpm/` | `fedora:41` |
 | arch | moderate-high | `modules/packages/arch/` | `archlinux:base` |
 | alt | high | _(handler only)_ | (limited image availability) |
-| rubygems | high (Marshal) | `modules/packages/rubygems/` | `ruby:3.3-slim` |
+| rubygems ✓ done | high (Marshal) | `modules/packages/rubygems/` | `ruby:3.3-slim` |
 | conan | high | `modules/packages/conan/` | `conanio/gcc11-ubuntu16.04` |
 | chef | high (auth) | `modules/packages/chef/` | `chef/chef:18` |
-| container | very high | `modules/packages/container/` | `gcr.io/go-containerregistry/crane` |
+| container ✓ done | very high | `modules/packages/container/` | `gcr.io/go-containerregistry/crane` |
 
 ---
 

@@ -5,6 +5,88 @@ Each entry: date, decision, rationale, and (when relevant) what I'd revisit late
 
 ---
 
+## 2026-05-28 — Alpine (apk) format (seventh format landed)
+
+**Decision:** Implement Forgejo's Alpine registry as the seventh
+package format. Mounts at `/api/packages/:tenant/alpine`. Five
+endpoints (one public-key, one upload, one download, one delete, plus
+on-demand APKINDEX.tar.gz served via the download route's
+filename-dispatcher), modeled on
+`forgejo/routers/api/packages/alpine/alpine.go` (MIT) and
+`forgejo/services/packages/alpine/repository.go`.
+
+**Composite-key avoidance:** apk's repo layout addresses each `.apk`
+by `(branch, repository, architecture, filename)`. Forgejo adds a
+`composite_key` column to `package_files` to disambiguate; we don't
+have that, so we encode the tuple directly into the file row's
+`name`: `<branch>|<repository>|<architecture>|<basename>.apk`. This
+keeps the existing `UNIQUE(version_id, name)` invariant intact for
+multi-arch publishes of the same version. The on-wire `basename` is
+recovered by splitting on `|` in the handler. Trade-off: SQL
+queries that need to filter by coordinate end up doing `LIKE
+'<branch>|<repository>|<arch>|%'`, which is fine for our scale but
+would warrant a real column at high cardinality.
+
+**APKINDEX built on demand:** Forgejo caches the signed
+`APKINDEX.tar.gz` as a file on a synthetic `_alpine`/`_repository`
+package and rebuilds it on every upload/delete. We skip the cache
+and rebuild from the live file metadata on each GET. The rebuild is
+sub-100ms even with a few hundred packages and the simpler "always
+fresh" semantics dodges a whole class of cache-invalidation bugs.
+Worth revisiting if we hit very large repos (alpine main has ~10k
+packages) — building the index becomes O(n) per request and the
+index file itself reaches several MB. The cache strategy is a
+straightforward upgrade when we need it.
+
+**Per-tenant RSA signing keys, stored as properties:** apk refuses
+to accept an unsigned APKINDEX (`UNTRUSTED signature`), so signing
+is non-negotiable. We generate a 4096-bit RSA keypair on first
+request and persist it as properties on a synthetic `_alpine`
+package row scoped to the tenant. This piggybacks on the existing
+`package_properties` table rather than introducing a
+`tenant_settings` table. The synthetic-package trick is what
+forgejo does upstream (it calls it the "internal" package), so an
+operator inspecting the DB sees a recognisable layout. Public-key
+distribution is exposed at `GET /api/packages/:tenant/alpine/key`
+with the right `<owner>@<fingerprint>.rsa.pub` filename — clients
+drop the file in `/etc/apk/keys/`. Key rotation is currently a
+manual SQL exercise; a `/key/rotate` endpoint with a grace period
+is on the roadmap.
+
+**`noarch` fan-out:** When PKGINFO advertises `arch = noarch` we
+publish the same `.apk` file row under every architecture the repo
+already has (falling back to `x86_64` if the repo is empty). Same
+behavior as forgejo and a stock alpine mirror. The fan-out happens
+under the same `CreatePackageOrAddFileToExisting` ingest path so
+all the policy hooks fire per-arch.
+
+**Cross-platform CI:** the blackbox test had to handle that
+`apk update` always fetches `<repo>/<arch>/APKINDEX.tar.gz` where
+`arch` is the *container's* runtime arch — `aarch64` on Apple
+Silicon dev laptops, `x86_64` on linux/amd64 CI. The test now
+publishes the fixture for both arches up front to stay
+arch-agnostic without runtime branching.
+
+**Validated wire-compat:** the blackbox test launches a real
+`alpine:3.20` container, installs the tenant's public key, points
+`/etc/apk/repositories` at us, and runs `apk update` followed by
+`apk search`. The signature-verification step inside `apk update`
+is the load-bearing assertion: any byte-level mismatch in our
+APKINDEX.tar.gz construction (gzip stream count, tar trailer,
+PKCS#1-v1.5 SHA1 detached signature, fingerprint header) would
+manifest as `BAD signature`. The test passes against our build,
+which means our APKINDEX is byte-equal to what real apk-tools
+publishes.
+
+**Skipped scope (deliberately):** we don't drive `apk add` in the
+blackbox test because that requires building a fully-installable
+`.apk` (rootfs tar + control hash dance + per-file signing). The
+index format and signature is what matters for "this looks like a
+real Alpine mirror"; `apk add` of an arbitrary upstream package is
+an integration test for `apk` itself, not for our index.
+
+---
+
 ## 2026-05-28 — Generic format (sixth format landed)
 
 **Decision:** Implement Forgejo's "generic" registry as the sixth

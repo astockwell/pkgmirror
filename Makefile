@@ -85,7 +85,7 @@ run-public: ## Run with the default tenant set to public (useful for quick demos
 .PHONY: test test-race test-cover test-all \
         test-blackbox test-blackbox-go test-blackbox-pypi \
         test-blackbox-npm test-blackbox-rubygems test-blackbox-container \
-        test-blackbox-generic
+        test-blackbox-generic test-blackbox-alpine
 
 test: ## Fast unit + grey-box tests (no docker).
 	$(GO) test ./...
@@ -117,6 +117,9 @@ test-blackbox-container: ## Container / OCI conformance only.
 
 test-blackbox-generic: ## Generic format conformance only.
 	$(GO) test -tags=blackbox -timeout=$(BB_TIMEOUT) ./tests/blackbox/generic/...
+
+test-blackbox-alpine: ## Alpine (apk) conformance only.
+	$(GO) test -tags=blackbox -timeout=$(BB_TIMEOUT) ./tests/blackbox/alpine/...
 
 test-all: test test-blackbox ## Run unit + grey-box + black-box.
 
