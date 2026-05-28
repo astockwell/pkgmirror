@@ -118,6 +118,8 @@ func main() {
 		Tenants:       tenantStore,
 		Authenticator: authn,
 		Engine:        engine,
+		Rules:         ruleStore,
+		Audit:         auditLogger,
 		Templates:     assets.Templates(),
 	})
 	if err != nil {

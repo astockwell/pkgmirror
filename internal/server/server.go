@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"net/http"
 
+	"github.com/astockwell/pkgmirror/internal/admin"
+	"github.com/astockwell/pkgmirror/internal/audit"
 	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
@@ -28,7 +30,11 @@ type Deps struct {
 	Authenticator auth.Authenticator
 	// Engine is the supply-chain policy engine. If nil, defaults to
 	// policy.NoopEngine{} (allow-everything).
-	Engine    policy.Engine
+	Engine policy.Engine
+	// Rules + Audit power the /admin endpoints. If both are nil, no
+	// admin routes are mounted.
+	Rules     *policy.RuleStore
+	Audit     audit.Logger
 	Templates fs.FS
 }
 
@@ -57,6 +63,14 @@ func New(d Deps) (*gin.Engine, error) {
 
 	pypiGroup := r.Group("/api/packages/:tenant/pypi")
 	pypi.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(pypiGroup)
+
+	if d.Rules != nil {
+		(&admin.Handler{
+			Models: d.Models,
+			Rules:  d.Rules,
+			Audit:  d.Audit,
+		}).Register(r)
+	}
 
 	ui.New(d.Service, d.Models, d.Tenants).Register(r)
 

@@ -365,6 +365,57 @@ func (s *Store) SetLicense(ctx context.Context, versionID int64, license string)
 	return err
 }
 
+// QuarantinedView is a denormalized row joining packages + versions used
+// by the admin quarantine listing.
+type QuarantinedView struct {
+	VersionID    int64
+	PackageID    int64
+	TenantID     int64
+	Type         Type
+	PackageName  string
+	Version      string
+	CreatedUnix  int64
+	Reason       string
+	RuleID       int64
+}
+
+// ListQuarantined returns every quarantined version, optionally scoped
+// to a tenant (tenantID = 0 means "all").
+func (s *Store) ListQuarantined(ctx context.Context, tenantID int64) ([]QuarantinedView, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	q := `SELECT v.id, v.package_id, p.tenant_id, p.type, p.name, v.version,
+	             v.created_unix, COALESCE(v.quarantine_reason, ''),
+	             COALESCE(v.quarantined_by_rule_id, 0)
+	        FROM package_versions v
+	        JOIN packages p ON p.id = v.package_id
+	       WHERE v.quarantine_reason IS NOT NULL`
+	if tenantID != 0 {
+		q += " AND p.tenant_id = ?"
+		rows, err = s.DB.QueryContext(ctx, q+" ORDER BY v.created_unix DESC", tenantID)
+	} else {
+		rows, err = s.DB.QueryContext(ctx, q+" ORDER BY v.created_unix DESC")
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []QuarantinedView
+	for rows.Next() {
+		var v QuarantinedView
+		var typ string
+		if err := rows.Scan(&v.VersionID, &v.PackageID, &v.TenantID, &typ,
+			&v.PackageName, &v.Version, &v.CreatedUnix, &v.Reason, &v.RuleID); err != nil {
+			return nil, err
+		}
+		v.Type = Type(typ)
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 // ----- Blobs -----
 
 // GetOrCreateBlob inserts a blob if one with the same SHA-256 doesn't exist.
