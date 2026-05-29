@@ -12,6 +12,14 @@ not yet reviewed.
 expose; this plan is about the *delivery shape*, not what data the
 console shows.
 
+**Companion document:**
+[plans/web-console-implementation-plan.md](web-console-implementation-plan.md)
+is the file-by-file implementer's runbook — phased PR sequence,
+file-level overviews, logging conventions, error-handling
+conventions, flash messaging, form handling, middleware order,
+testing conventions. Read this architecture plan first, that one
+when actually writing the code.
+
 ---
 
 ## 1. What this plan covers
@@ -885,6 +893,12 @@ templates are mechanical once auth is solid.
 
 Total: ~4 days for a usable MVP. The schema migration and
 session bits are load-bearing — don't skimp on them.
+
+**See also:**
+[plans/web-console-implementation-plan.md](web-console-implementation-plan.md)
+recuts these 12 steps as **eight PR-sized vertical slices** (each
+independently shippable + stress-loop-green) and walks file by
+file through what lands in each.
 
 ---
 
