@@ -1,0 +1,60 @@
+{{ define "pages/quarantine/list" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>Quarantine</h1>
+    <p class="muted">Versions held back by the supply-chain policy engine. Promote to release; reject to mark forensic-only (bytes stay on disk; v2 will add raw delete with retention policy).</p>
+  </header>
+
+  {{ if .Body.Rows }}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Tenant</th>
+        <th>Format</th>
+        <th>Package</th>
+        <th>Version</th>
+        <th>Reason</th>
+        <th>Held since</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Body.Rows }}
+      <tr>
+        <td class="muted">#{{ .TenantID }}</td>
+        <td>{{ .Type }}</td>
+        <td>{{ .PackageName }}</td>
+        <td><code>{{ .Version }}</code></td>
+        <td>
+          {{ if hasPrefix .Reason "REJECTED:" }}
+            <span style="color:var(--danger)">{{ .Reason }}</span>
+          {{ else }}
+            {{ default "(no reason)" .Reason }}
+          {{ end }}
+        </td>
+        <td class="muted">{{ humanTime .CreatedUnix }}</td>
+        <td style="white-space:nowrap">
+          {{ if not (hasPrefix .Reason "REJECTED:") }}
+          <form method="post" action="/console/quarantine/{{ .VersionID }}/promote" style="display:inline">
+            {{ $.Base.CSRFField }}
+            <button type="submit" class="btn btn-sm" onclick="return confirm('Promote version {{ .Version }}?')">Promote</button>
+          </form>
+          <form method="post" action="/console/quarantine/{{ .VersionID }}/reject" style="display:inline">
+            {{ $.Base.CSRFField }}
+            <input type="hidden" name="reason" value="rejected via console">
+            <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Reject (and keep for forensics) version {{ .Version }}?')">Reject</button>
+          </form>
+          {{ else }}
+          <span class="muted">rejected</span>
+          {{ end }}
+        </td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  {{ template "ui/alert" (dict "severity" "success" "title" "Nothing in quarantine"
+        "body" "All uploads are passing the configured policy rules. This is the goal state.") }}
+  {{ end }}
+</section>
+{{ end }}

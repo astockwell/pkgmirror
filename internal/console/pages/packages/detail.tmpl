@@ -1,0 +1,48 @@
+{{ define "pages/packages/detail" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>{{ .Body.Package.Name }} <span class="muted" style="font-size:1rem">({{ .Body.Package.Type }})</span></h1>
+    <p class="muted">
+      Tenant <a href="/console/tenants/{{ .Body.Tenant.Name }}">{{ .Body.Tenant.Name }}</a>
+      &middot; <a href="/console/tenants/{{ .Body.Tenant.Name }}/packages">All packages</a>
+    </p>
+  </header>
+
+  {{ if .Body.Versions }}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Version</th>
+        <th>License</th>
+        <th>Created</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Body.Versions }}
+      <tr>
+        <td><code>{{ .Version }}</code></td>
+        <td class="muted">{{ default "-" .License }}</td>
+        <td class="muted">{{ humanTime .CreatedUnix }}</td>
+        <td>
+          {{ if .Quarantined }}
+            {{ if hasPrefix .Reason "REJECTED:" }}
+              <span style="color:var(--danger)">rejected</span>
+              <span class="muted">- {{ .Reason }}</span>
+            {{ else }}
+              <span style="color:var(--warning)">quarantined</span>
+              <span class="muted">- {{ default "no reason" .Reason }}</span>
+            {{ end }}
+          {{ else }}
+            <span style="color:var(--success)">live</span>
+          {{ end }}
+        </td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  <p class="muted">No versions for this package yet.</p>
+  {{ end }}
+</section>
+{{ end }}

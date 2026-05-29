@@ -175,12 +175,19 @@ func (c *Console) Register(r *gin.Engine) error {
 	// by CanRead per row); state-changing routes are system-admin only.
 	authed.GET("/tenants", c.tenantsList)
 	authed.GET("/tenants/:name", c.tenantDetail)
+	authed.GET("/tenants/:name/packages", c.packagesByTenant)
+	authed.GET("/tenants/:name/packages/:type/:pkgname", c.packageDetail)
 	adminOnly := authed.Group("", c.middleware.RequireSystemAdmin())
 	adminOnly.GET("/tenants/new", c.tenantNew)
 	adminOnly.POST("/tenants", c.tenantCreate)
 	adminOnly.POST("/tenants/:name/visibility", c.tenantSetVisibility)
 	adminOnly.POST("/tenants/:name/members", c.tenantMemberAdd)
 	adminOnly.POST("/tenants/:name/members/:user_id/delete", c.tenantMemberRemove)
+
+	// Quarantine (system admin only - cross-tenant view + actions).
+	adminOnly.GET("/quarantine", c.quarantineList)
+	adminOnly.POST("/quarantine/:version_id/promote", c.quarantinePromote)
+	adminOnly.POST("/quarantine/:version_id/reject", c.quarantineReject)
 
 	return nil
 }

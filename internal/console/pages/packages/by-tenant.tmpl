@@ -1,0 +1,34 @@
+{{ define "pages/packages/by-tenant" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>Packages in {{ .Body.Tenant.Name }}</h1>
+    <p class="muted"><a href="/console/tenants/{{ .Body.Tenant.Name }}">&larr; Back to tenant</a></p>
+  </header>
+
+  {{ if .Body.Packages }}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Format</th>
+        <th>Package</th>
+        <th>Versions</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Body.Packages }}
+      <tr>
+        <td>{{ .Type }}</td>
+        <td><a href="/console/tenants/{{ $.Body.Tenant.Name }}/packages/{{ .Type }}/{{ .Name }}">{{ .Name }}</a></td>
+        <td>{{ .Versions }}</td>
+        <td><a href="/console/tenants/{{ $.Body.Tenant.Name }}/packages/{{ .Type }}/{{ .Name }}">View</a></td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  {{ template "ui/alert" (dict "severity" "info" "title" "No packages"
+        "body" "This tenant has no packages yet. Upload one with the registry API to see it here.") }}
+  {{ end }}
+</section>
+{{ end }}
