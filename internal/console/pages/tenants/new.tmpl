@@ -1,0 +1,31 @@
+{{ define "pages/tenants/new" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>New tenant</h1>
+    <p class="muted">Create a namespace for packages.</p>
+  </header>
+
+  <form method="post" action="/console/tenants" style="max-width:520px">
+    {{ .Base.CSRFField }}
+    <div class="field">
+      <label for="name" class="field-label">Name</label>
+      <input id="name" name="name" type="text" class="field-input" value="{{ .Body.Name }}" autofocus required>
+      <p class="field-help">Letters, digits, hyphens, underscores. 2-40 characters. Used in URLs.</p>
+      {{ with index .Body.Errors "name" }}<p class="field-error">{{ . }}</p>{{ end }}
+    </div>
+    <div class="field">
+      <label for="visibility" class="field-label">Visibility</label>
+      <select id="visibility" name="visibility" class="field-select">
+        <option value="private" {{ if eq .Body.Visibility "private" }}selected{{ end }}>private</option>
+        <option value="public"  {{ if eq .Body.Visibility "public" }}selected{{ end }}>public</option>
+      </select>
+      <p class="field-help">public = anonymous reads allowed; private = membership required.</p>
+      {{ with index .Body.Errors "visibility" }}<p class="field-error">{{ . }}</p>{{ end }}
+    </div>
+    <div style="display:flex;gap:8px">
+      <button type="submit" class="btn btn-primary">Create tenant</button>
+      <a href="/console/tenants" class="btn">Cancel</a>
+    </div>
+  </form>
+</section>
+{{ end }}

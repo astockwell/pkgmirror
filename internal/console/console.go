@@ -171,6 +171,17 @@ func (c *Console) Register(r *gin.Engine) error {
 	// Dashboard.
 	authed.GET("/", c.dashboard)
 
+	// Tenants. List + detail are member-readable (the handlers filter
+	// by CanRead per row); state-changing routes are system-admin only.
+	authed.GET("/tenants", c.tenantsList)
+	authed.GET("/tenants/:name", c.tenantDetail)
+	adminOnly := authed.Group("", c.middleware.RequireSystemAdmin())
+	adminOnly.GET("/tenants/new", c.tenantNew)
+	adminOnly.POST("/tenants", c.tenantCreate)
+	adminOnly.POST("/tenants/:name/visibility", c.tenantSetVisibility)
+	adminOnly.POST("/tenants/:name/members", c.tenantMemberAdd)
+	adminOnly.POST("/tenants/:name/members/:user_id/delete", c.tenantMemberRemove)
+
 	return nil
 }
 

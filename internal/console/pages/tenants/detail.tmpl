@@ -1,0 +1,87 @@
+{{ define "pages/tenants/detail" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>{{ .Body.Tenant.Name }}</h1>
+    <p class="muted">
+      Tenant #{{ .Body.Tenant.ID }} &middot;
+      {{ if eq .Body.Tenant.Visibility 1 }}<span class="user-badge" style="background:var(--success)">public</span>{{ else }}<span class="muted">private</span>{{ end }}
+      &middot; {{ .Body.PackageCount }} packages
+    </p>
+  </header>
+
+  {{ if .Body.CanManage }}
+  <form method="post" action="/console/tenants/{{ .Body.Tenant.Name }}/visibility" style="margin-bottom:24px;display:flex;gap:8px;align-items:center">
+    {{ .Base.CSRFField }}
+    <label class="muted" for="visibility">Visibility:</label>
+    <select id="visibility" name="visibility" class="field-select" style="width:auto">
+      <option value="private" {{ if eq .Body.Tenant.Visibility 0 }}selected{{ end }}>private</option>
+      <option value="public"  {{ if eq .Body.Tenant.Visibility 1 }}selected{{ end }}>public</option>
+    </select>
+    <button type="submit" class="btn btn-sm">Update</button>
+  </form>
+  {{ end }}
+</section>
+
+<section class="page-section">
+  <header class="page-header">
+    <h2 style="font-size:1.2rem">Members</h2>
+  </header>
+
+  {{ if .Body.Members }}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>User</th>
+        <th>Email</th>
+        <th>Role</th>
+        <th>Admin</th>
+        {{ if .Body.CanManage }}<th></th>{{ end }}
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Body.Members }}
+      <tr>
+        <td>{{ .UserName }}</td>
+        <td class="muted">{{ default "-" .UserEmail }}</td>
+        <td>{{ .RoleName }}</td>
+        <td>{{ if .IsAdmin }}<span class="user-badge">admin</span>{{ else }}<span class="muted">no</span>{{ end }}</td>
+        {{ if $.Body.CanManage }}
+        <td>
+          <form method="post" action="/console/tenants/{{ $.Body.Tenant.Name }}/members/{{ .UserID }}/delete" style="display:inline">
+            {{ $.Base.CSRFField }}
+            <button type="submit" class="btn btn-ghost btn-sm" onclick="return confirm('Remove {{ .UserName }} from {{ $.Body.Tenant.Name }}?')">Remove</button>
+          </form>
+        </td>
+        {{ end }}
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  <p class="muted">No members yet.</p>
+  {{ end }}
+
+  {{ if .Body.CanManage }}
+  <section class="page-section" style="margin-top:24px">
+    <h3 style="font-size:1.05rem">Add member</h3>
+    <form method="post" action="/console/tenants/{{ .Body.Tenant.Name }}/members" style="max-width:500px">
+      {{ .Base.CSRFField }}
+      <div class="field">
+        <label for="username" class="field-label">Username</label>
+        <input id="username" name="username" type="text" class="field-input" required>
+      </div>
+      <div class="field">
+        <label for="role" class="field-label">Role</label>
+        <select id="role" name="role" class="field-select">
+          <option value="reader">reader</option>
+          <option value="writer" selected>writer</option>
+          <option value="admin">admin (tenant)</option>
+        </select>
+        <p class="field-help">reader = pull only; writer = pull + push; admin = pull + push + manage members.</p>
+      </div>
+      <button type="submit" class="btn btn-primary">Add member</button>
+    </form>
+  </section>
+  {{ end }}
+</section>
+{{ end }}

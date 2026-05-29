@@ -1,0 +1,43 @@
+{{ define "pages/tenants/list" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>Tenants</h1>
+    <p class="muted">Namespaces for packages. Each tenant has its own visibility, members, and packages.</p>
+    {{ if and .Base.Identity .Base.Identity.User .Base.Identity.User.IsAdmin }}
+    <p style="margin-top:8px"><a href="/console/tenants/new" class="btn btn-primary btn-sm">New tenant</a></p>
+    {{ end }}
+  </header>
+
+  {{ if .Body.Tenants }}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Visibility</th>
+        <th>Packages</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Body.Tenants }}
+      <tr>
+        <td><a href="/console/tenants/{{ .Name }}">{{ .Name }}</a></td>
+        <td>
+          {{ if .IsPublic }}
+            <span class="user-badge" style="background:var(--success)">public</span>
+          {{ else }}
+            <span class="muted">private</span>
+          {{ end }}
+        </td>
+        <td>{{ .PackageCount }}</td>
+        <td><a href="/console/tenants/{{ .Name }}">View</a></td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  {{ template "ui/alert" (dict "severity" "info" "title" "No tenants visible"
+        "body" "You don't have access to any tenants yet. A system admin can grant you membership.") }}
+  {{ end }}
+</section>
+{{ end }}

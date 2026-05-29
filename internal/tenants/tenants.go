@@ -196,3 +196,48 @@ func (s *Store) Count(ctx context.Context) (int, error) {
 	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants`).Scan(&n)
 	return n, err
 }
+
+// Member is a single (tenant, user, role) triple.
+type Member struct {
+	TenantID  int64
+	UserID    int64
+	UserName  string
+	UserEmail sql.NullString
+	IsAdmin   bool
+	Role      Role
+}
+
+// ListMembers returns the members of a tenant joined with users so the
+// web console can show usernames + emails without a second round-trip.
+// Ordered by lower(user.name) for stable rendering.
+func (s *Store) ListMembers(ctx context.Context, tenantID int64) ([]*Member, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT tm.tenant_id, tm.user_id, u.name, u.email, u.is_admin, tm.role
+		   FROM tenant_members tm
+		   JOIN users u ON u.id = tm.user_id
+		  WHERE tm.tenant_id = ?
+		  ORDER BY u.lower_name`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Member
+	for rows.Next() {
+		m := &Member{}
+		var role, isAdmin int
+		if err := rows.Scan(&m.TenantID, &m.UserID, &m.UserName, &m.UserEmail, &isAdmin, &role); err != nil {
+			return nil, err
+		}
+		m.Role = Role(role)
+		m.IsAdmin = isAdmin != 0
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// RemoveMember removes a user from a tenant. Idempotent.
+func (s *Store) RemoveMember(ctx context.Context, tenantID, userID int64) error {
+	_, err := s.DB.ExecContext(ctx,
+		`DELETE FROM tenant_members WHERE tenant_id = ? AND user_id = ?`, tenantID, userID)
+	return err
+}
