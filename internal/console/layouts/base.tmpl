@@ -17,7 +17,7 @@
         {{ template "partials/flash" .Base.Flash }}
       {{ end }}
       <div class="app-page">
-        {{ tmpl .Page .Body }}
+        {{ tmpl .Page . }}
       </div>
       <footer class="app-footer">
         <span>pkgmirror {{ .Base.AppVersion }}</span>

@@ -21,9 +21,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/astockwell/pkgmirror/internal/audit"
 	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/console/middleware"
 	"github.com/astockwell/pkgmirror/internal/tenants"
+	"github.com/astockwell/pkgmirror/internal/tokens"
 	"github.com/astockwell/pkgmirror/internal/users"
 
 	"github.com/gin-contrib/sessions"
@@ -33,28 +35,35 @@ import (
 
 // Deps bundles the dependencies a Console needs.
 //
-// Authenticator is left nil in PR 1 (no console auth yet); PR 2 wires
-// it via NewAuthenticator(Config) which selects password or proxy-header
-// mode based on Config.AuthMode.
+// Authenticator selects the credential source: in password mode, pass
+// a SessionAuthenticator; in proxy-header mode (PR 2c), a
+// ProxyHeaderAuthenticator. Leave nil only in tests of the foundation
+// chain (PR 1).
 type Deps struct {
 	Config        Config
 	Logger        *slog.Logger
 	Users         *users.Store
 	Tenants       *tenants.Store
-	Authenticator auth.Authenticator // nil until PR 2 lands
+	Tokens        *tokens.Store
+	Audit         audit.Logger
+	Authenticator auth.Authenticator
 	AppVersion    string
 }
 
 // Console is the web-console DSO. One per process.
 type Console struct {
-	cfg        Config
-	logger     *slog.Logger
-	users      *users.Store
-	tenants    *tenants.Store
-	auth       auth.Authenticator
-	templates  *template.Template
-	middleware *middleware.Middleware
-	appVersion string
+	cfg         Config
+	logger      *slog.Logger
+	users       *users.Store
+	tenants     *tenants.Store
+	tokens      *tokens.Store
+	audit       audit.Logger
+	auth        auth.Authenticator
+	templates   *template.Template
+	middleware  *middleware.Middleware
+	loginLimit  *middleware.LoginRateLimiter
+	authedGroup *gin.RouterGroup // populated by Register; consumed by AuthedGroup
+	appVersion  string
 }
 
 // New constructs a Console from Deps. Returns an error if any of:
@@ -80,9 +89,12 @@ func New(d Deps) (*Console, error) {
 		logger:     d.Logger,
 		users:      d.Users,
 		tenants:    d.Tenants,
+		tokens:     d.Tokens,
+		audit:      d.Audit,
 		auth:       d.Authenticator,
 		templates:  tmpl,
 		appVersion: d.AppVersion,
+		loginLimit: middleware.NewLoginRateLimiter(10, time.Minute),
 	}
 	c.middleware = middleware.New(middleware.Deps{
 		Logger:   c.logger,
@@ -111,8 +123,8 @@ func (c *Console) Register(r *gin.Engine) error {
 		r.StaticFS("/console/static", http.FS(staticFS))
 	}
 
-	// Session + CSRF + security headers + recovery + request-id + access
-	// log middleware all apply to the rest of /console, in this order.
+	// Build the per-console middleware chain. Order matters and is
+	// documented in plans/web-console-implementation-plan.md §9.
 	sess, err := middleware.NewSessionMiddleware(middleware.SessionConfig{
 		AuthKey: c.cfg.Session.AuthKey,
 		EncKey:  c.cfg.Session.EncKey,
@@ -124,21 +136,36 @@ func (c *Console) Register(r *gin.Engine) error {
 		return fmt.Errorf("session middleware: %w", err)
 	}
 
-	g := r.Group("/console",
+	chain := []gin.HandlerFunc{
 		middleware.Recover(c.logger),
 		middleware.RequestID(),
 		middleware.AccessLog(c.logger),
 		middleware.SecurityHeaders(c.cfg.UsingTLS),
+		middleware.WithGinContext(), // must precede session/auth so they can read *gin.Context out of ctx
 		sess,
 		middleware.CSRF(c.cfg.CSRFKey, c.cfg.UsingTLS),
-	)
+	}
+	if c.auth != nil {
+		chain = append(chain, auth.Middleware(c.auth))
+	}
 
-	// PR 2 wires the authenticator middleware here:
-	//   if c.auth != nil { g.Use(auth.Middleware(c.auth)) }
-	// PR 1 has no console auth and no RequireAuth gate. /console/_ping
-	// is anonymous so the PR can land standalone.
+	g := r.Group("/console", chain...)
 
+	// Anonymous routes (login, logout, set-password, ping).
 	g.GET("/_ping", c.ping)
+	g.GET("/login", c.loginPage)
+	g.POST("/login", middleware.LoginRateLimitMiddleware(c.loginLimit, c.cfg.TrustedProxies), c.loginSubmit)
+	g.POST("/logout", c.logout)
+	g.GET("/set-password", c.setPasswordPage)
+	g.POST("/set-password", middleware.LoginRateLimitMiddleware(c.loginLimit, c.cfg.TrustedProxies), c.setPasswordSubmit)
+
+	// Authenticated routes go in a child group with RequireAuth.
+	// Subsequent PRs (3-8) hang their handlers off `authed`.
+	authed := g.Group("", c.middleware.RequireAuth())
+	c.authedGroup = authed
+
+	// PR 3 lands /, /-dashboard data, etc on authed.
+	// authed.GET("/", c.dashboard)
 
 	return nil
 }
@@ -317,6 +344,21 @@ func (c *Console) Config() Config { return c.cfg }
 // Middleware exposes the gate helpers (RequireAuth, RequireSystemAdmin,
 // etc.). PR 2 starts populating them.
 func (c *Console) Middleware() *middleware.Middleware { return c.middleware }
+
+// AuthedGroup returns the gin.RouterGroup that has RequireAuth applied.
+// Page handlers in subsequent PRs (3-8) hang their routes off this group
+// so every page automatically inherits the auth gate.
+//
+// Returns nil before Register has been called.
+func (c *Console) AuthedGroup() *gin.RouterGroup { return c.authedGroup }
+
+// Audit returns the underlying audit.Logger. Console handlers use it to
+// emit console.* audit rows (login, logout, password set, etc.).
+func (c *Console) Audit() audit.Logger { return c.audit }
+
+// Tokens returns the underlying tokens.Store. Used by the set-password
+// flow to verify a user's PAT before letting them set a password.
+func (c *Console) Tokens() *tokens.Store { return c.tokens }
 
 // renderToBuffer is the implementation that the "tmpl" template func
 // (registered in templates.go) calls. Kept on Console so it can log

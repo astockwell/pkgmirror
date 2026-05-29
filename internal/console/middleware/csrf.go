@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -17,6 +19,13 @@ import (
 // default for an admin UI — strict would break flows that bounce
 // through an OIDC IdP later, lax is enough to defend against
 // cross-origin POSTs.
+//
+// gorilla/csrf v1.7+ defaults to assuming the request is HTTPS and
+// rejects plain-HTTP Referer headers with ErrBadReferer. When the
+// console is NOT behind TLS (laptop dev, test server, plain-HTTP
+// proxy fronting), we flip the request context's
+// csrf.PlaintextHTTPContextKey so gorilla evaluates Origin/Referer
+// rules against http: schemes correctly.
 func CSRF(secretKey []byte, secure bool) gin.HandlerFunc {
 	if len(secretKey) == 0 {
 		// Shouldn't reach here — Config.EnsureKeys gates this.
@@ -36,15 +45,27 @@ func CSRF(secretKey []byte, secure bool) gin.HandlerFunc {
 		csrf.ErrorHandler(http.HandlerFunc(csrfErrorPage)),
 	)
 	return func(c *gin.Context) {
-		// gorilla/csrf reads + augments the request; capture the
-		// (possibly-augmented) request back into the gin context so
-		// downstream handlers see the same one. csrf adds a context
-		// value containing the token nonce that csrf.TemplateField
-		// reads via the http.Request, not the response.
+		// Tell gorilla/csrf this is a plaintext-HTTP request when we
+		// know TLS isn't in front. Without this, the Referer check
+		// requires an https:// referer and rejects laptop-dev traffic.
+		if !secure {
+			c.Request = c.Request.WithContext(context.WithValue(
+				c.Request.Context(), csrf.PlaintextHTTPContextKey, true))
+		}
+		// gorilla/csrf is an http.Handler-shaped middleware: it either
+		// calls the inner handler (request OK) or its ErrorHandler
+		// (request rejected). We track whether the inner ran; if it
+		// didn't, gorilla rejected and we must abort the gin chain so
+		// no downstream handler also writes to the response.
+		var innerRan bool
 		inner(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			innerRan = true
 			c.Request = r
 			c.Next()
 		})).ServeHTTP(c.Writer, c.Request)
+		if !innerRan {
+			c.Abort()
+		}
 	}
 }
 
@@ -53,6 +74,16 @@ func CSRF(secretKey []byte, secure bool) gin.HandlerFunc {
 // plain text response is fine since CSRF failures should be rare and
 // users can always navigate back to retry.
 func csrfErrorPage(w http.ResponseWriter, r *http.Request) {
+	// Surface the underlying reason via slog so operators can debug
+	// real misconfiguration (mismatched cookie domain, stale token,
+	// Origin/Referer policy, etc).
+	reason := csrf.FailureReason(r)
+	slog.Default().Warn("csrf rejected",
+		"path", r.URL.Path,
+		"reason", reason,
+		"origin", r.Header.Get("Origin"),
+		"referer", r.Header.Get("Referer"))
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)
 	_, _ = w.Write([]byte(`<!doctype html><html><head><meta charset="utf-8">` +

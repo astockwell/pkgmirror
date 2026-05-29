@@ -1,8 +1,8 @@
 {{ define "pages/_ping" }}
 <section class="page-section">
   <header class="page-header">
-    <h1>{{ .Title }}</h1>
-    <p class="muted">{{ .Message }}</p>
+    <h1>{{ .Body.Title }}</h1>
+    <p class="muted">{{ .Body.Message }}</p>
   </header>
   <div class="grid grid-3">
     {{ template "ui/card" (dict "title" "Status" "value" "OK" "subtitle" "/console/_ping is alive") }}

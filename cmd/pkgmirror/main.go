@@ -18,6 +18,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/bootstrap"
 	"github.com/astockwell/pkgmirror/internal/config"
 	"github.com/astockwell/pkgmirror/internal/console"
+	consolemw "github.com/astockwell/pkgmirror/internal/console/middleware"
 	pkgdb "github.com/astockwell/pkgmirror/internal/db"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
@@ -164,11 +165,29 @@ func main() {
 		if generated {
 			log.Printf("console: generated ephemeral session/CSRF keys (dev-mode or PKGMIRROR_CONSOLE_ALLOW_EPHEMERAL_KEYS=true). Sessions invalidate on restart.")
 		}
+		// PR 2b: select the console authenticator from config. Today
+		// only password mode is implemented; proxy-header lands in PR 2c.
+		// Call Validate up front so consoleCfg.AuthMode picks up its
+		// default ("password") before the log line below + the
+		// authenticator switch below.
+		if err := consoleCfg.Validate(); err != nil {
+			log.Fatalf("console config: %v", err)
+		}
+		var consoleAuthn auth.Authenticator
+		switch consoleCfg.AuthMode {
+		case "password":
+			consoleAuthn = consolemw.NewSessionAuthenticator(userStore, tenantStore)
+		case "proxy-header":
+			log.Fatalf("console: PKGMIRROR_CONSOLE_AUTH_MODE=proxy-header not yet supported (lands in PR 2c)")
+		}
 		c, err := console.New(console.Deps{
-			Config:     consoleCfg,
-			Users:      userStore,
-			Tenants:    tenantStore,
-			AppVersion: "dev", // PR 1 ships a placeholder; later PR may inject ldflags-injected version.
+			Config:        consoleCfg,
+			Users:         userStore,
+			Tenants:       tenantStore,
+			Tokens:        tokenStore,
+			Audit:         auditLogger,
+			Authenticator: consoleAuthn,
+			AppVersion:    "dev",
 		})
 		if err != nil {
 			log.Fatalf("console: %v", err)

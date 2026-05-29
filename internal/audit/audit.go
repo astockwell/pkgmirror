@@ -34,6 +34,14 @@ type Event struct {
 	RemoteAddr string
 	UserAgent  string
 
+	// ActorKind distinguishes how the actor authenticated:
+	//   "token"   PAT-backed (registry, admin REST)
+	//   "session" web console password mode
+	//   "proxy"   web console proxy-header mode
+	//   ""        unknown / system event
+	// Persisted to audit_log.actor_kind (schema v4).
+	ActorKind string
+
 	TenantID int64
 	Action   string // "ingest" | "read" | "rule_create" | "rule_update" | "rule_delete" | "promote_quarantined" | …
 	Format   string
@@ -141,6 +149,7 @@ func (s dbSink) Write(e Event) error {
 		remote    any = e.RemoteAddr
 		ua        any = e.UserAgent
 		reason    any = e.Reason
+		actorKind any = e.ActorKind
 	)
 	if e.UserID == 0 {
 		userID = nil
@@ -181,15 +190,18 @@ func (s dbSink) Write(e Event) error {
 	if e.Reason == "" {
 		reason = nil
 	}
+	if e.ActorKind == "" {
+		actorKind = nil
+	}
 
 	_, err := s.db.Exec(
 		`INSERT INTO audit_log
-		   (created_unix, actor_user_id, actor_token_id, request_id,
+		   (created_unix, actor_user_id, actor_token_id, actor_kind, request_id,
 		    remote_addr, user_agent, tenant_id, action,
 		    format, package, version, filename,
 		    decision, rule_id, reason, extra_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.CreatedUnix, userID, tokenID, requestID,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.CreatedUnix, userID, tokenID, actorKind, requestID,
 		remote, ua, tenantID, e.Action,
 		fmtCol, pkg, ver, filename,
 		decision, ruleID, reason, extra)
