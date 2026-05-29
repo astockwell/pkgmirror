@@ -20,27 +20,63 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// CredentialKind distinguishes how a request's identity was established.
+//
+// Token-backed identities (PATs, the registry's existing surface) gate
+// state-changing actions on the token's scopes. Browser-backed identities
+// (web console sessions, web console proxy-header trust) have no separate
+// scope grant: the act of signing in or being trusted by the upstream
+// proxy carries the full authority of the underlying user. Wiring the
+// distinction through here means the same Identity contract serves both
+// surfaces without weakening the token-scope check that the registry/admin
+// REST endpoints rely on.
+type CredentialKind int
+
+const (
+	// CredentialToken is a request authenticated by a personal access
+	// token (DB-backed; carries scopes + optional tenant binding).
+	CredentialToken CredentialKind = iota
+	// CredentialSession is a request authenticated by a web console
+	// password-mode session cookie (gorilla/sessions).
+	CredentialSession
+	// CredentialProxy is a request authenticated by a trusted upstream
+	// proxy via configured user/email headers (oauth2-proxy, Cloudflare
+	// Access, AWS ALB, etc.).
+	CredentialProxy
+)
+
 // Identity describes the resolved caller for a request.
 type Identity struct {
 	User        *users.User
-	Token       *tokens.Token         // non-nil if authed via token
+	Token       *tokens.Token         // non-nil iff Kind == CredentialToken
 	Memberships map[int64]tenants.Role // tenant ID -> role
+	Kind        CredentialKind         // how this identity was established
 }
 
 // CanRead reports whether this identity is permitted to read packages in
 // the given tenant. Admins always can; otherwise the user must have
-// reader+ membership AND a token that carries the "read" scope.
+// reader+ membership AND a token that carries the "read" scope (token
+// kind only — browser-backed identities don't carry separate scope
+// grants).
 func (id *Identity) CanRead(tenantID int64) bool {
 	if id == nil {
 		return false
 	}
-	if id.User != nil && id.User.IsAdmin && id.HasTokenScope(tokens.ScopeAdmin) {
+	if id.IsSystemAdmin() {
 		return true
 	}
-	if !id.tokenAllowsTenant(tenantID) {
-		return false
-	}
-	if !id.HasTokenScope(tokens.ScopeRead) && !id.HasTokenScope(tokens.ScopeWrite) {
+	switch id.Kind {
+	case CredentialToken:
+		if !id.tokenAllowsTenant(tenantID) {
+			return false
+		}
+		if !id.HasTokenScope(tokens.ScopeRead) && !id.HasTokenScope(tokens.ScopeWrite) {
+			return false
+		}
+	case CredentialSession, CredentialProxy:
+		// Browser-backed identities have no token scopes; membership is
+		// the sole gate.
+	default:
 		return false
 	}
 	role, ok := id.Memberships[tenantID]
@@ -53,22 +89,42 @@ func (id *Identity) CanWrite(tenantID int64) bool {
 	if id == nil {
 		return false
 	}
-	if id.User != nil && id.User.IsAdmin && id.HasTokenScope(tokens.ScopeAdmin) {
+	if id.IsSystemAdmin() {
 		return true
 	}
-	if !id.tokenAllowsTenant(tenantID) {
-		return false
-	}
-	if !id.HasTokenScope(tokens.ScopeWrite) {
+	switch id.Kind {
+	case CredentialToken:
+		if !id.tokenAllowsTenant(tenantID) {
+			return false
+		}
+		if !id.HasTokenScope(tokens.ScopeWrite) {
+			return false
+		}
+	case CredentialSession, CredentialProxy:
+		// Browser-backed identities have no token scopes; membership is
+		// the sole gate.
+	default:
 		return false
 	}
 	role, ok := id.Memberships[tenantID]
 	return ok && role >= tenants.RoleWriter
 }
 
-// IsSystemAdmin reports whether this identity carries system-admin authority.
+// IsSystemAdmin reports whether this identity carries system-admin
+// authority. Token-backed identities additionally require the admin scope
+// on the token; browser-backed identities (session, proxy) carry the
+// underlying user's admin flag directly.
 func (id *Identity) IsSystemAdmin() bool {
-	return id != nil && id.User != nil && id.User.IsAdmin && id.HasTokenScope(tokens.ScopeAdmin)
+	if id == nil || id.User == nil || !id.User.IsAdmin {
+		return false
+	}
+	switch id.Kind {
+	case CredentialToken:
+		return id.HasTokenScope(tokens.ScopeAdmin)
+	case CredentialSession, CredentialProxy:
+		return true
+	}
+	return false
 }
 
 // HasTokenScope reports whether the request's token includes the scope. If
@@ -133,7 +189,7 @@ func (a *TokenAuthenticator) Authenticate(ctx context.Context, r *http.Request) 
 		_ = a.Tokens.TouchLastUsed(context.Background(), tok.ID)
 		_ = a.Users.TouchLastSeen(context.Background(), u.ID)
 	}()
-	return &Identity{User: u, Token: tok, Memberships: mem}, nil
+	return &Identity{User: u, Token: tok, Memberships: mem, Kind: CredentialToken}, nil
 }
 
 // extractToken pulls the plaintext token from the Authorization header.
