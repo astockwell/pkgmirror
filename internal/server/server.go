@@ -49,6 +49,14 @@ type Deps struct {
 }
 
 // New constructs a configured *gin.Engine.
+//
+// The auth middleware is mounted per-route-group rather than globally,
+// so the registry, admin REST, public UI, and (in the future) the web
+// console can each be wired to their own Authenticator. Today every
+// non-healthz group runs the same TokenAuthenticator passed in via
+// Deps.Authenticator; the per-group seam is what lets the web console
+// arrive with a SessionAuthenticator / ProxyHeaderAuthenticator on its
+// own /console subtree without touching the registry's auth at all.
 func New(d Deps) (*gin.Engine, error) {
 	if d.Engine == nil {
 		d.Engine = policy.NoopEngine{}
@@ -56,7 +64,6 @@ func New(d Deps) (*gin.Engine, error) {
 
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
-	r.Use(auth.Middleware(d.Authenticator))
 	r.Use(policyActorMiddleware())
 
 	tmpl, err := template.New("").Funcs(template.FuncMap{
@@ -67,54 +74,49 @@ func New(d Deps) (*gin.Engine, error) {
 	}
 	r.SetHTMLTemplate(tmpl)
 
+	// Single shared instance of the registry/admin/UI auth middleware.
+	// auth.Middleware only populates *auth.Identity into the gin context
+	// on success; enforcement (RequireRead / RequireWrite / IsSystemAdmin)
+	// happens in the handlers themselves.
+	tokenAuth := auth.Middleware(d.Authenticator)
+
 	// Format-specific API groups: /api/packages/:tenant/<format>/...
-	goGroup := r.Group("/api/packages/:tenant/go")
-	goproxy.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(goGroup)
-
-	pypiGroup := r.Group("/api/packages/:tenant/pypi")
-	pypi.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(pypiGroup)
-
-	npmGroup := r.Group("/api/packages/:tenant/npm")
-	npm.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(npmGroup)
-
-	rubygemsGroup := r.Group("/api/packages/:tenant/rubygems")
-	rubygems.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(rubygemsGroup)
-
-	genericGroup := r.Group("/api/packages/:tenant/generic")
-	generic.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(genericGroup)
-
-	alpineGroup := r.Group("/api/packages/:tenant/alpine")
-	alpine.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(alpineGroup)
-
-	mavenGroup := r.Group("/api/packages/:tenant/maven")
-	maven.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(mavenGroup)
-
-	debianGroup := r.Group("/api/packages/:tenant/debian")
-	debian.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(debianGroup)
-
-	rpmGroup := r.Group("/api/packages/:tenant/rpm")
-	rpm.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(rpmGroup)
-
-	nugetGroup := r.Group("/api/packages/:tenant/nuget")
-	nuget.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(nugetGroup)
-
-	cranGroup := r.Group("/api/packages/:tenant/cran")
-	cran.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(cranGroup)
+	// All gated by tokenAuth. The :tenant path param is resolved inside
+	// each handler before applying RequireRead / RequireWrite.
+	apiBase := r.Group("/api/packages/:tenant", tokenAuth)
+	goproxy.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/go"))
+	pypi.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/pypi"))
+	npm.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/npm"))
+	rubygems.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/rubygems"))
+	generic.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/generic"))
+	alpine.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/alpine"))
+	maven.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/maven"))
+	debian.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/debian"))
+	rpm.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/rpm"))
+	nuget.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/nuget"))
+	cran.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/cran"))
 
 	// Container (OCI) lives at the root /v2/... per the OCI distribution
 	// spec; clients don't tolerate a path prefix. Tenant is the first
-	// path segment after /v2.
-	container.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(r)
+	// path segment after /v2. Auth is applied per-route via the variadic
+	// middleware Register accepts (gin can't Group on a wildcard path).
+	container.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(r, tokenAuth)
 
+	// Admin REST API. Token auth + admin-scope gate; the latter lives
+	// inside admin.Handler.requireSystemAdmin and runs after tokenAuth.
 	if d.Rules != nil {
 		(&admin.Handler{
 			Models: d.Models,
 			Rules:  d.Rules,
 			Audit:  d.Audit,
-		}).Register(r)
+		}).Register(r, tokenAuth)
 	}
 
-	ui.New(d.Service, d.Models, d.Tenants).Register(r)
+	// Public UI. Registers /-/healthz top-level (anonymous) plus the
+	// authed `/` and `/t/...` routes via the supplied middleware.
+	// auth.FromContext returns nil for unauthenticated callers; the
+	// UI handlers rely on that to filter tenant visibility.
+	ui.New(d.Service, d.Models, d.Tenants).Register(r, tokenAuth)
 
 	r.NoRoute(func(c *gin.Context) {
 		c.String(http.StatusNotFound, "not found")

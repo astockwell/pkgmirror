@@ -31,11 +31,19 @@ func New(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store) *Handler {
 }
 
 // Register attaches UI routes to the engine.
-func (h *Handler) Register(r *gin.Engine) {
-	r.GET("/", h.index)
+//
+// Optional middleware (typically the auth.Middleware that populates
+// *auth.Identity into the gin context) is applied to every UI route
+// except /-/healthz. Healthz stays anonymous so liveness probes don't
+// hit the auth layer.
+func (h *Handler) Register(r *gin.Engine, middleware ...gin.HandlerFunc) {
+	// Healthz is always anonymous; register before the authed group.
 	r.GET("/-/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
-	r.GET("/t/:tenant", h.tenantPage)
-	r.GET("/t/:tenant/p/:type/*name", h.packageOrVersion)
+
+	g := r.Group("", middleware...)
+	g.GET("/", h.index)
+	g.GET("/t/:tenant", h.tenantPage)
+	g.GET("/t/:tenant/p/:type/*name", h.packageOrVersion)
 }
 
 type tenantRow struct {

@@ -30,9 +30,15 @@ type Handler struct {
 
 // Register mounts the admin routes on r.  All routes are gated by
 // requireSystemAdmin which calls auth.RequireSystemAdmin under the hood.
-func (h *Handler) Register(r *gin.Engine) {
-	g := r.Group("/admin")
-	g.Use(h.requireSystemAdmin)
+//
+// Optional middleware (typically the auth.Middleware that populates
+// *auth.Identity into the gin context) is prepended onto the /admin
+// group ahead of the system-admin gate. Pass it from server.New when
+// the engine itself no longer applies auth globally.
+func (h *Handler) Register(r *gin.Engine, middleware ...gin.HandlerFunc) {
+	handlers := append([]gin.HandlerFunc{}, middleware...)
+	handlers = append(handlers, h.requireSystemAdmin)
+	g := r.Group("/admin", handlers...)
 
 	g.GET("/rules", h.listRules)
 	g.POST("/rules", h.upsertRule)

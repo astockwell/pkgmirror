@@ -103,7 +103,7 @@ func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store, eng pol
 // mirrors what Forgejo does in
 // `forgejo/routers/api/packages/api.go` (search for
 // `blobsUploadsPattern` / `blobsPattern` / `manifestsPattern`).
-func (h *Handler) Register(r gin.IRouter) {
+func (h *Handler) Register(r gin.IRouter, middleware ...gin.HandlerFunc) {
 	for _, m := range []struct {
 		method string
 		fn     gin.HandlerFunc
@@ -115,7 +115,9 @@ func (h *Handler) Register(r gin.IRouter) {
 		{http.MethodPatch, h.dispatch(http.MethodPatch)},
 		{http.MethodDelete, h.dispatch(http.MethodDelete)},
 	} {
-		r.Handle(m.method, "/v2/*action", m.fn)
+		handlers := append([]gin.HandlerFunc{}, middleware...)
+		handlers = append(handlers, m.fn)
+		r.Handle(m.method, "/v2/*action", handlers...)
 	}
 }
 
