@@ -45,49 +45,55 @@ pkgmirror deployment, not consumers of the registries.
 
 ## 2. Recommendation
 
-**Single binary now, with a clean internal package boundary and a
-feature flag (`PKGMIRROR_CONSOLE_ENABLED`, default `true`) to
-disable the console.** Defer splitting into a second binary until
-one of three concrete triggers fires (see §8).
+**Single binary.** Console handlers compile into the same
+`pkgmirror` process as the registry, gated by a feature flag
+(`PKGMIRROR_CONSOLE_ENABLED`, default `true`) so the console
+can be stripped out cleanly.
 
 Concretely:
 
 - Console handlers live in `internal/console/`
 - HTML templates in `templates/console/`
 - Static assets (CSS/JS/favicon) in `internal/console/static/`,
-  served at `/console/static/...` (namespaced under the console
-  group so a future split topology routes them with the rest of
-  the console)
+  served at `/console/static/...` (namespaced under the
+  console group so the routing stays clean)
 - Mounted at `/console/...`
 - `cmd/pkgmirror/main.go` reads the flag and wires the console
   group only when enabled
 
+Production deployment topology (Postgres, horizontal scaling,
+ingress shape, etc.) is **out of scope** for this plan. SQLite
+is the local-development / PoC backend; this plan assumes
+that backend. Moving to Postgres and figuring out how to
+actually deploy at scale lives in a separate plan that we'll
+write when that decision is on the table.
+
 ---
 
-## 3. Why a single binary today
+## 3. Why a single binary
 
-### 3.1. SQLite is the load-bearing constraint
+### 3.1. SQLite is local-dev / PoC scope
 
-Two binaries writing to the same SQLite file is not viable. WAL
-mode allows concurrent **reads** but writers serialize on a
-single file lock, and the WAL-race patterns already documented
-in [docs/long-term-maintenance.md](../docs/long-term-maintenance.md)
-§7 (the macOS APFS one, the sibling-test SQLITE_BUSY one) would
-compound across processes.
+We are explicitly **not** deploying pkgmirror in a
+load-balanced or high-availability configuration backed by
+SQLite, and this plan does not try to enable that. SQLite is
+the storage layer for `make run` on a laptop and for the
+docker-compose / single-VM PoC topology that everything in
+this repo is currently aimed at.
 
-The realistic split-binary topologies all force a choice:
+A real production deployment is a future, separate decision
+that would also bring Postgres along with it. When that
+happens, the deployment topology (how many processes, how
+ingress is split, what handles what) gets re-designed end to
+end. We're not pre-deciding any of it here.
 
-1. **Both binaries on the same SQLite file** → bad, will corrupt
-   under load
-2. **One binary owns the DB; the other calls it over HTTP** →
-   you've already "split", but now both processes still need to
-   coexist, with a network hop and serialization layer added to
-   every operation that's currently an in-process function call
-3. **Move to Postgres** → real lift; separate decision; not on
-   the table today
-
-Until (3) is on the table, the SQLite constraint says **one
-process owns writes.**
+What that scope decision buys us *now*: we don't have to
+design for multiple writable processes against a single
+storage file, we don't have to design for cross-process
+session state, and we don't have to invent a sidecar
+protocol so a console pod can ask a registry pod to do
+things. The whole "console talks to registry over HTTP"
+failure-mode space goes away.
 
 ### 3.2. The scale isn't there yet
 
@@ -696,56 +702,23 @@ the app stays small.
 
 ---
 
-## 6. K8s topology
+## 6. Deployment topology
 
-### 6.1. Day-1 (every deployment today)
+Out of scope for this plan.
 
-```
-Deployment: pkgmirror (exactly 1 replica for SQLite)
-  - serves /api/packages/* + /console/* + /admin/*
-  - PKGMIRROR_CONSOLE_ENABLED=true
-Service: pkgmirror :8080
-Ingress: pkgmirror.example.com → Service
-```
+The single-binary, single-process model is what `make run`
+gives you on a laptop and what a docker-compose / single-VM
+PoC deployment looks like — console + registry + admin REST
+on one listener, served behind whatever TLS terminator and
+auth proxy the operator already has. That's the entire
+deployment story this plan commits to.
 
-Single Service, single Ingress, console + registry on one
-listener. Operators reach the console at `https://pkgmirror.example.com/console`;
-package clients hit the registry routes.
-
-**`1` replica, not `1+`:** SQLite's single-writer constraint
-(§3.1) means multiple writable replicas against the same
-file is unsafe. Horizontal scale is a Day-2 concern that
-arrives together with the Postgres migration; see §6.2.
-
-### 6.2. Day-2 (when a §8 trigger fires AND Postgres migration is done)
-
-```
-Deployment: pkgmirror-registry (N replicas)
-  - serves /api/packages/* + /admin/*
-  - PKGMIRROR_CONSOLE_ENABLED=false
-  - DATABASE_URL=postgres://...
-Service: pkgmirror-registry :8080
-
-Deployment: pkgmirror-console (1-2 replicas)
-  - serves /console/* only (which includes /console/static/*)
-  - PKGMIRROR_REGISTRY_ENABLED=false  (new flag to mirror)
-  - DATABASE_URL=postgres://... (same database)
-Service: pkgmirror-console :8080
-
-Ingress:
-  /console/* → pkgmirror-console Service
-  everything else → pkgmirror-registry Service
-```
-
-The `PKGMIRROR_REGISTRY_ENABLED` flag is the mirror image of the
-console flag and lands at the same time as the split: when set
-to `false`, the registry route groups don't register. Same
-binary, opposite behavior.
-
-**This topology requires Postgres.** If you haven't migrated off
-SQLite by the time you want to split, the topology is forced
-back to single-binary anyway. So: don't optimize for the split
-until the Postgres migration is on the table.
+Moving pkgmirror to a load-balanced / HA / horizontally-
+scaled topology is a future decision that arrives together
+with the Postgres migration, and the topology design will be
+written then — not pre-baked here. Until that decision is
+actively on the table, the console assumes the same single-
+process model the rest of the app already assumes.
 
 ---
 
@@ -864,26 +837,20 @@ toolchain commitment.**
 
 ---
 
-## 8. When to actually split into two binaries
+## 8. Splitting into a second binary
 
-Three concrete triggers, **any** of which justifies the work:
+Out of scope for this plan, for the same reason §6 is: any
+"split the console out of the registry process" story is
+entangled with multi-replica deployment, which is entangled
+with the Postgres migration. None of those are happening in
+the MVP and we're not pre-deciding them here.
 
-1. **The console grows a heavy operation** — async report
-   generation, full audit-log scrubbing, OCI image scanning,
-   anything that runs for >30s. You don't want it sharing a
-   process with package downloads. Split.
-2. **You need different ingress / WAF / rate-limit policies** for
-   the registry vs the console. Easier to enforce at the
-   deployment boundary than in middleware.
-3. **You move to Postgres and have a real reason to scale them
-   independently** (registry hot, console cold). Even with
-   Postgres, one binary still works *unless* (1) or (2) is also
-   true.
-
-Until one of those fires, "single binary with clean boundary"
-gives ~all the benefits of split (clean package, disable flag,
-predictable scope) and none of the cost (no IPC, no double
-config, no auth-between-services, no SQLite contention).
+The `PKGMIRROR_CONSOLE_ENABLED` flag means a future split
+remains *possible* without anything in the MVP code blocking
+it — the console package is self-contained and the flag
+strips it from the binary cleanly. But the actual split is
+not tracked as a follow-up task on this plan; it's part of
+the future production-deployment plan.
 
 ---
 
@@ -937,11 +904,11 @@ listed here as a one-stop reference so the DECISIONS.md entry
   swap for Redis/SQLite-backed store when operator count grows.
   (§5.4)
 - **Listener layout decided:** same listener with route-group
-  separation. Day-1 deployment is one binary, one
-  `http.Server`, one Service, one Ingress. Day-2 split into
-  separate binaries (§6.2) handles the divergent-policy /
-  divergent-scale case better than two listeners in one
-  process would. (§4.3, §6.1)
+  separation. One binary, one `http.Server`, one Service, one
+  Ingress. Splitting the console onto its own listener is out
+  of scope (§6, §8) — it's entangled with the Postgres
+  migration and the future production-deployment plan, and
+  doesn't need to be decided now. (§4.3)
 - **Console scope decided:** admin-only for MVP. End-user-facing
   pages (per-tenant package browse without admin login) are a
   v2 item (§11.2). Limits the v1 scope and the threat model.
@@ -965,19 +932,22 @@ Items intentionally deferred from the MVP:
 5. **Bulk operations** — quarantine all versions of a package
    matching a glob, promote all-versions, etc. (rules engine
    covers this via patterns today; UI surfacing is the gap.)
-6. **Postgres migration** — pre-requisite for the §6.2 split
-   topology. Tracked separately as its own plan.
-7. **Splitting into two binaries** per §8 triggers.
-8. **HTMX (re-introduce, scoped)** — if any specific form is
+6. **Production deployment plan** — picking a real database
+   (Postgres is the obvious candidate), deciding how to deploy
+   at scale (multi-replica registry, separate console deployment
+   if warranted, ingress shape, rate-limit policy, etc.). This
+   is its own plan written when the decision is on the table;
+   nothing in this MVP commits to any particular shape.
+7. **HTMX (re-introduce, scoped)** — if any specific form is
    meaningfully worse with full-page reloads (rules editor with
    live dry-run preview is the most likely candidate), add HTMX
    for that page only. Don't blanket-introduce.
-9. **Full templui-equivalent component inventory** — sheet,
+8. **Full templui-equivalent component inventory** — sheet,
    popover, tooltip, collapsible, etc. Grow `partials/ui/` to
    match copilot-api's depth only if usage justifies it.
-10. **Search command palette** — copilot-api's `SearchScript` +
-    `search.js`. Cmd-K "go to anything" navigation. Nice-to-have
-    once we have >20 page types.
+9. **Search command palette** — copilot-api's `SearchScript` +
+   `search.js`. Cmd-K "go to anything" navigation. Nice-to-have
+   once we have >20 page types.
 
 ---
 
@@ -990,10 +960,6 @@ Items intentionally deferred from the MVP:
 - **CSRF is easy to get wrong.** Home-growing is fine but the
   test surface needs to actually probe the failure modes
   (missing token, stale token, cross-tenant token reuse).
-- **Session-store-in-SQLite** competes with the same write
-  serialization as the rest of the schema. For a console with
-  N=tens of operators, this is fine; for thousands it'd want a
-  separate store. Not on the horizon.
 - **The "console disabled, registry only" mode** must continue
   to serve the existing `/admin/...` REST routes — those are
   the PAT-authenticated programmatic interface and they're not
