@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"time"
 )
+
+var timeNow = time.Now
 
 // Query is a read filter for ListEvents.
 type Query struct {
@@ -126,3 +129,39 @@ func ListEvents(ctx context.Context, db *sql.DB, q Query) ([]Event, error) {
 	}
 	return out, rows.Err()
 }
+
+// DecisionRollup returns count-by-decision over a window. Used by the
+// web console dashboard widget. Empty-decision rows (non-policy events
+// like login/logout) are excluded.
+//
+// since and until are Unix seconds; until == 0 means "now".
+func DecisionRollup(ctx context.Context, db *sql.DB, since, until int64) (map[string]int64, error) {
+	if until == 0 {
+		untilUnix := nowUnix()
+		until = untilUnix
+	}
+	rows, err := db.QueryContext(ctx,
+		`SELECT decision, COUNT(*) FROM audit_log
+		   WHERE decision IS NOT NULL AND decision != ''
+		     AND created_unix BETWEEN ? AND ?
+		   GROUP BY decision`,
+		since, until)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var d string
+		var n int64
+		if err := rows.Scan(&d, &n); err != nil {
+			return nil, err
+		}
+		out[d] = n
+	}
+	return out, rows.Err()
+}
+
+// nowUnix is broken out as a var so tests can stub it. Real callers
+// always pass an explicit until anyway; this is just defensive.
+var nowUnix = func() int64 { return timeNow().Unix() }

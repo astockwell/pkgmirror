@@ -24,6 +24,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/audit"
 	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/console/middleware"
+	"github.com/astockwell/pkgmirror/internal/models"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/tokens"
 	"github.com/astockwell/pkgmirror/internal/users"
@@ -44,6 +45,7 @@ type Deps struct {
 	Logger        *slog.Logger
 	Users         *users.Store
 	Tenants       *tenants.Store
+	Models        *models.Store
 	Tokens        *tokens.Store
 	Audit         audit.Logger
 	Authenticator auth.Authenticator
@@ -56,6 +58,7 @@ type Console struct {
 	logger      *slog.Logger
 	users       *users.Store
 	tenants     *tenants.Store
+	models      *models.Store
 	tokens      *tokens.Store
 	audit       audit.Logger
 	auth        auth.Authenticator
@@ -89,6 +92,7 @@ func New(d Deps) (*Console, error) {
 		logger:     d.Logger,
 		users:      d.Users,
 		tenants:    d.Tenants,
+		models:     d.Models,
 		tokens:     d.Tokens,
 		audit:      d.Audit,
 		auth:       d.Authenticator,
@@ -164,8 +168,8 @@ func (c *Console) Register(r *gin.Engine) error {
 	authed := g.Group("", c.middleware.RequireAuth())
 	c.authedGroup = authed
 
-	// PR 3 lands /, /-dashboard data, etc on authed.
-	// authed.GET("/", c.dashboard)
+	// Dashboard.
+	authed.GET("/", c.dashboard)
 
 	return nil
 }

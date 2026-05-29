@@ -17,6 +17,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/console"
 	consolemw "github.com/astockwell/pkgmirror/internal/console/middleware"
 	pkgdb "github.com/astockwell/pkgmirror/internal/db"
+	"github.com/astockwell/pkgmirror/internal/models"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/tokens"
 	"github.com/astockwell/pkgmirror/internal/users"
@@ -35,6 +36,7 @@ type authFixture struct {
 	Tenants *tenants.Store
 	Tokens  *tokens.Store
 	Audit   audit.Logger
+	Models  *models.Store
 	Console *console.Console
 	Server  *httptest.Server
 	Client  *http.Client
@@ -54,6 +56,7 @@ func newAuthFixture(t *testing.T) *authFixture {
 	userStore := users.New(db)
 	tenantStore := tenants.New(db)
 	tokenStore := tokens.New(db)
+	modelStore := models.New(db)
 	auditLogger := audit.New(db, 256)
 	t.Cleanup(func() { _ = auditLogger.Close() })
 
@@ -63,6 +66,7 @@ func newAuthFixture(t *testing.T) *authFixture {
 		Config:        cfg,
 		Users:         userStore,
 		Tenants:       tenantStore,
+		Models:        modelStore,
 		Tokens:        tokenStore,
 		Audit:         auditLogger,
 		Authenticator: authn,
@@ -91,7 +95,7 @@ func newAuthFixture(t *testing.T) *authFixture {
 
 	return &authFixture{
 		t: t, DB: db,
-		Users: userStore, Tenants: tenantStore, Tokens: tokenStore, Audit: auditLogger,
+		Users: userStore, Tenants: tenantStore, Tokens: tokenStore, Audit: auditLogger, Models: modelStore,
 		Console: c, Server: srv, Client: cli,
 	}
 }

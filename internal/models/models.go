@@ -223,6 +223,41 @@ func (s *Store) ListPackages(ctx context.Context, tenantID int64, t Type) ([]*Pa
 	return out, rows.Err()
 }
 
+// CountPackages returns the total package count, optionally filtered to
+// a single tenant (tenantID == 0 = global). Used by the web console
+// dashboard.
+func (s *Store) CountPackages(ctx context.Context, tenantID int64) (int, error) {
+	var (
+		n   int
+		err error
+	)
+	if tenantID == 0 {
+		err = s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM packages`).Scan(&n)
+	} else {
+		err = s.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM packages WHERE tenant_id = ?`, tenantID).Scan(&n)
+	}
+	return n, err
+}
+
+// CountVersions returns the total package_versions count. tenantID == 0
+// means global; otherwise filters by joining packages.tenant_id.
+func (s *Store) CountVersions(ctx context.Context, tenantID int64) (int, error) {
+	var (
+		n   int
+		err error
+	)
+	if tenantID == 0 {
+		err = s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM package_versions`).Scan(&n)
+	} else {
+		err = s.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM package_versions v
+			   JOIN packages p ON p.id = v.package_id
+			  WHERE p.tenant_id = ?`, tenantID).Scan(&n)
+	}
+	return n, err
+}
+
 // ----- Versions -----
 
 // CreateVersion inserts a new version. Returns ErrDuplicatePackageVersion

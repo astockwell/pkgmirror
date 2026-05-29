@@ -168,6 +168,8 @@ func (s *Store) ResolveTenantID(ctx context.Context, name string) (int64, error)
 }
 
 // Memberships returns the (tenantID -> role) map for a user.
+// Memberships returns the tenant -> role map for a user. Used by the
+// auth layer to gate per-tenant access.
 func (s *Store) Memberships(ctx context.Context, userID int64) (map[int64]Role, error) {
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT tenant_id, role FROM tenant_members WHERE user_id = ?`, userID)
@@ -185,4 +187,12 @@ func (s *Store) Memberships(ctx context.Context, userID int64) (map[int64]Role, 
 		out[tid] = Role(role)
 	}
 	return out, rows.Err()
+}
+
+// Count returns the total number of tenants. Used by the web console
+// dashboard widget.
+func (s *Store) Count(ctx context.Context) (int, error) {
+	var n int
+	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants`).Scan(&n)
+	return n, err
 }

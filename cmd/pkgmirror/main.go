@@ -195,6 +195,7 @@ func main() {
 			Config:        consoleCfg,
 			Users:         userStore,
 			Tenants:       tenantStore,
+			Models:        pkgModels,
 			Tokens:        tokenStore,
 			Audit:         auditLogger,
 			Authenticator: consoleAuthn,

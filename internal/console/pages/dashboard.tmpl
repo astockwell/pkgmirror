@@ -1,0 +1,76 @@
+{{ define "pages/dashboard" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>Dashboard</h1>
+    <p class="muted">
+      {{ if and .Base.Identity .Base.Identity.User }}
+        Signed in as <strong>{{ .Base.Identity.User.Name }}</strong>{{ if .Base.Identity.User.IsAdmin }} <span class="user-badge">admin</span>{{ end }}.
+      {{ end }}
+    </p>
+  </header>
+
+  <div class="grid grid-4">
+    {{ template "ui/card" (dict "title" "Tenants"        "value" .Body.TotalTenants  "subtitle" "across the deployment") }}
+    {{ template "ui/card" (dict "title" "Packages"       "value" .Body.TotalPackages "subtitle" "across all tenants") }}
+    {{ template "ui/card" (dict "title" "Versions"       "value" .Body.TotalVersions "subtitle" "individual releases stored") }}
+    {{ template "ui/card" (dict "title" "Your tenants"   "value" .Body.YourTenants   "subtitle" "you can read") }}
+  </div>
+</section>
+
+<section class="page-section">
+  <header class="page-header">
+    <h2 style="font-size:1.2rem">Recent ingests</h2>
+    <p class="muted">Last 10 ingest events across all tenants.</p>
+  </header>
+  {{ if .Body.RecentIngests }}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>When</th>
+        <th>Format</th>
+        <th>Package</th>
+        <th>Version</th>
+        <th>Decision</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Body.RecentIngests }}
+      <tr>
+        <td class="muted">{{ humanTime .WhenUnix }}</td>
+        <td>{{ .Format }}</td>
+        <td>{{ .Package }}</td>
+        <td><code>{{ .Version }}</code></td>
+        <td>
+          {{ if eq .Decision "allow" }}<span style="color:var(--success)">{{ .Decision }}</span>
+          {{ else if eq .Decision "warn" }}<span style="color:var(--warning)">{{ .Decision }}</span>
+          {{ else if eq .Decision "quarantine" }}<span style="color:var(--warning)">{{ .Decision }}</span>
+          {{ else if eq .Decision "deny" }}<span style="color:var(--danger)">{{ .Decision }}</span>
+          {{ else }}<span class="muted">{{ default "-" .Decision }}</span>{{ end }}
+        </td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  {{ template "ui/alert" (dict "severity" "info" "title" "No ingest events yet"
+        "body" "Upload a package to any tenant and it will appear here.") }}
+  {{ end }}
+</section>
+
+<section class="page-section">
+  <header class="page-header">
+    <h2 style="font-size:1.2rem">Policy decisions (last {{ .Body.WindowHours }}h)</h2>
+    <p class="muted">From the supply-chain policy engine.</p>
+  </header>
+  {{ if .Body.Decisions24h }}
+  <div class="grid grid-4">
+    {{ range .Body.Decisions24h }}
+      {{ template "ui/card" (dict "title" (upper .Decision) "value" .Count "subtitle" "decisions") }}
+    {{ end }}
+  </div>
+  {{ else }}
+  {{ template "ui/alert" (dict "severity" "info" "title" "Quiet"
+        "body" "No policy decisions in the window. This is normal when no rules are configured or when no ingests have happened.") }}
+  {{ end }}
+</section>
+{{ end }}
