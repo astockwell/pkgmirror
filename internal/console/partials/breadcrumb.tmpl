@@ -1,0 +1,10 @@
+{{ define "partials/breadcrumb" }}
+{{/* Stub for PR 1; PR 3+ each page wires its own breadcrumb data. */}}
+{{ if .ActiveTenant }}
+<nav class="breadcrumb" aria-label="Breadcrumb">
+  <a href="{{ .ConsolePath }}/tenants">Tenants</a>
+  <span class="breadcrumb-sep">/</span>
+  <span>{{ .ActiveTenant.Name }}</span>
+</nav>
+{{ end }}
+{{ end }}

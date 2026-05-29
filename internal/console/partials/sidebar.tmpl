@@ -1,0 +1,38 @@
+{{ define "partials/sidebar" }}
+<aside class="app-sidebar" aria-label="Primary navigation">
+  <div class="brand">
+    <a href="{{ .ConsolePath }}/" class="brand-link">
+      <span class="brand-mark">📦</span>
+      <span class="brand-name">pkgmirror</span>
+    </a>
+  </div>
+  <nav class="nav-primary">
+    <ul>
+      <li><a href="{{ .ConsolePath }}/">Dashboard</a></li>
+      <li><a href="{{ .ConsolePath }}/tenants">Tenants</a></li>
+      <li><a href="{{ .ConsolePath }}/packages">Packages</a></li>
+      <li><a href="{{ .ConsolePath }}/audit">Audit</a></li>
+      <li><a href="{{ .ConsolePath }}/rules">Rules</a></li>
+      <li><a href="{{ .ConsolePath }}/tokens">Tokens</a></li>
+    </ul>
+  </nav>
+  <div class="sidebar-footer">
+    {{ if and .Identity .Identity.User }}
+      <div class="user-card">
+        <span class="user-name">{{ .Identity.User.Name }}</span>
+        {{ if .Identity.User.IsAdmin }}<span class="user-badge">admin</span>{{ end }}
+      </div>
+      <form method="post" action="{{ .ConsolePath }}/logout">
+        {{ .CSRFField }}
+        <button type="submit" class="btn btn-ghost btn-sm">Sign out</button>
+      </form>
+    {{ else }}
+      <a href="{{ .ConsolePath }}/login" class="btn btn-primary btn-sm">Sign in</a>
+    {{ end }}
+    <button type="button" class="btn btn-ghost btn-sm" data-theme-toggle aria-label="Toggle theme">
+      <span class="theme-icon-light">☀</span>
+      <span class="theme-icon-dark">☾</span>
+    </button>
+  </div>
+</aside>
+{{ end }}

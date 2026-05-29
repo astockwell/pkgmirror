@@ -1,0 +1,9 @@
+{{ define "pages/_notfound" }}
+<section class="page-section error-page">
+  <header class="page-header">
+    <h1>Not found</h1>
+    {{ if .Message }}<p>{{ .Message }}</p>{{ end }}
+  </header>
+  <p><a href="javascript:history.back()">Go back</a></p>
+</section>
+{{ end }}

@@ -1,0 +1,24 @@
+{{ define "layouts/auth" }}<!doctype html>
+<html lang="en" class="{{ if .Base.DarkMode }}dark{{ end }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ default "pkgmirror — sign in" .Base.PageTitle }}</title>
+  <link rel="stylesheet" href="/console/static/css/console.css?v={{ .Base.AppVersion }}">
+  <link rel="icon" href="/console/static/favicon.svg" type="image/svg+xml">
+</head>
+<body class="app auth-shell">
+  <main class="auth-card">
+    <header class="auth-header">
+      <h1>pkgmirror</h1>
+    </header>
+    {{ if .Base.Flash }}
+      {{ template "partials/flash" .Base.Flash }}
+    {{ end }}
+    {{ tmpl .Page .Body }}
+    <footer class="auth-footer">
+      <span class="muted">pkgmirror {{ .Base.AppVersion }}</span>
+    </footer>
+  </main>
+</body>
+</html>{{ end }}

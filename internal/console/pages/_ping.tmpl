@@ -1,0 +1,16 @@
+{{ define "pages/_ping" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>{{ .Title }}</h1>
+    <p class="muted">{{ .Message }}</p>
+  </header>
+  <div class="grid grid-3">
+    {{ template "ui/card" (dict "title" "Status" "value" "OK" "subtitle" "/console/_ping is alive") }}
+    {{ template "ui/card" (dict "title" "Auth" "value" "anonymous" "subtitle" "PR 1 ships no console authn yet") }}
+    {{ template "ui/card" (dict "title" "Build" "value" "foundation" "subtitle" "Layout + middleware chain") }}
+  </div>
+  <div class="page-section">
+    {{ template "ui/alert" (dict "severity" "info" "title" "Foundation up" "body" "If you see the sidebar, flash, and cards rendered, the embed.FS loader, security headers, session middleware, CSRF, and the template dispatcher are all wired correctly.") }}
+  </div>
+</section>
+{{ end }}

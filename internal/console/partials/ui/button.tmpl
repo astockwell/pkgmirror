@@ -1,0 +1,4 @@
+{{ define "ui/button" }}
+{{/* args: dict "label" string "variant" string "type" string "class" string */}}
+<button type="{{ default "button" .type }}" class="btn btn-{{ default "default" .variant }} {{ .class }}">{{ .label }}</button>
+{{ end }}

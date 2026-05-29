@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"log"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/bootstrap"
 	"github.com/astockwell/pkgmirror/internal/config"
+	"github.com/astockwell/pkgmirror/internal/console"
 	pkgdb "github.com/astockwell/pkgmirror/internal/db"
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
@@ -28,6 +30,8 @@ import (
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/tokens"
 	"github.com/astockwell/pkgmirror/internal/users"
+
+	"github.com/gin-gonic/gin"
 )
 
 func main() {
@@ -143,6 +147,38 @@ func main() {
 		log.Fatalf("build server: %v", err)
 	}
 
+	// Wire the web console (PR 1 ships only the foundation: /console/_ping
+	// + the layout + static assets + the security/session/CSRF middleware
+	// chain). Disabled with PKGMIRROR_CONSOLE_ENABLED=false.
+	consoleCfg, err := console.LoadConfigFromEnv()
+	if err != nil {
+		log.Fatalf("load console config: %v", err)
+	}
+	consoleCfg.UsingTLS = cfg.TLSEnabled()
+	if consoleCfg.Enabled {
+		devMode := gin.Mode() != gin.ReleaseMode || consoleCfg.DevDir != ""
+		generated, err := consoleCfg.EnsureKeys(devMode, secureRandom)
+		if err != nil {
+			log.Fatalf("console keys: %v", err)
+		}
+		if generated {
+			log.Printf("console: generated ephemeral session/CSRF keys (dev-mode or PKGMIRROR_CONSOLE_ALLOW_EPHEMERAL_KEYS=true). Sessions invalidate on restart.")
+		}
+		c, err := console.New(console.Deps{
+			Config:     consoleCfg,
+			Users:      userStore,
+			Tenants:    tenantStore,
+			AppVersion: "dev", // PR 1 ships a placeholder; later PR may inject ldflags-injected version.
+		})
+		if err != nil {
+			log.Fatalf("console: %v", err)
+		}
+		if err := c.Register(r); err != nil {
+			log.Fatalf("console register: %v", err)
+		}
+		log.Printf("console: mounted at /console (auth_mode=%s)", consoleCfg.AuthMode)
+	}
+
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           r,
@@ -189,4 +225,15 @@ func main() {
 		log.Printf("graceful shutdown: %v", err)
 	}
 	log.Printf("pkgmirror stopped")
+}
+
+// secureRandom is the random source passed to console.Config.EnsureKeys.
+// crypto/rand is the only acceptable source for session/CSRF keys; we
+// expose it as a function so EnsureKeys stays test-friendly.
+func secureRandom(n int) ([]byte, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return nil, err
+	}
+	return b, nil
 }

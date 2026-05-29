@@ -1,0 +1,37 @@
+{{ define "layouts/base" }}<!doctype html>
+<html lang="en" class="{{ if .Base.DarkMode }}dark{{ end }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>{{ default "pkgmirror" .Base.PageTitle }}</title>
+  <link rel="stylesheet" href="/console/static/css/console.css?v={{ .Base.AppVersion }}">
+  <link rel="icon" href="/console/static/favicon.svg" type="image/svg+xml">
+</head>
+<body class="app">
+  <div class="app-shell">
+    {{ template "partials/sidebar" .Base }}
+    <main class="app-main">
+      {{ template "partials/breadcrumb" .Base }}
+      {{ if .Base.Flash }}
+        {{ template "partials/flash" .Base.Flash }}
+      {{ end }}
+      <div class="app-page">
+        {{ tmpl .Page .Body }}
+      </div>
+      <footer class="app-footer">
+        <span>pkgmirror {{ .Base.AppVersion }}</span>
+        <span class="muted">{{ timefmt .Base.Now.Unix "2006-01-02 15:04:05" }}</span>
+      </footer>
+    </main>
+  </div>
+  <script src="/console/static/js/console.js?v={{ .Base.AppVersion }}" defer></script>
+  {{/* Per-page external JS via .Base.ScriptURLs. No inline scripts —
+       the CSP set in middleware/securityheaders.go forbids them. No
+       page-js define block — html/template's flat namespace would
+       silently let the last-parsed definition win. */}}
+  {{ range .Base.ScriptURLs }}
+  <script src="{{ . }}" defer></script>
+  {{ end }}
+</body>
+</html>{{ end }}

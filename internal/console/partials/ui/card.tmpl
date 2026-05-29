@@ -1,0 +1,10 @@
+{{ define "ui/card" }}
+{{/* args: dict "title" string "value" (any) "subtitle" string "href" string */}}
+<div class="card">
+  {{ if .href }}<a href="{{ .href }}" class="card-link">{{ end }}
+  <div class="card-title">{{ .title }}</div>
+  {{ if .value }}<div class="card-value">{{ .value }}</div>{{ end }}
+  {{ if .subtitle }}<div class="card-subtitle">{{ .subtitle }}</div>{{ end }}
+  {{ if .href }}</a>{{ end }}
+</div>
+{{ end }}

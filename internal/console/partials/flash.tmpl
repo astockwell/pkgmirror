@@ -1,0 +1,10 @@
+{{ define "partials/flash" }}
+<div class="flash-list" role="status" aria-live="polite">
+  {{ range . }}
+  <div class="flash flash-{{ .Severity }}">
+    <span class="flash-text">{{ .Text }}</span>
+    <button type="button" class="flash-dismiss" data-flash-dismiss aria-label="Dismiss">×</button>
+  </div>
+  {{ end }}
+</div>
+{{ end }}

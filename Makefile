@@ -80,6 +80,41 @@ run: ## Run pkgmirror from source against ./data.
 run-public: ## Run with the default tenant set to public (useful for quick demos).
 	PKGMIRROR_DEFAULT_TENANT_VISIBILITY=public $(GO) run $(PKG_MAIN)
 
+# ---- Console assets ----------------------------------------------------------
+#
+# The committed bundle at internal/console/static/css/console.css is
+# what gets embedded. `make build-css` is only needed when you edit
+# input.css or add a Tailwind class to a console template.
+#
+# `tools/tailwindcss/install.sh` pins an exact upstream version and
+# verifies the binary's SHA-256 before installing. On a machine without
+# the binary, `make build-css` will run the installer first.
+
+TAILWIND_BIN ?= $(BIN_DIR)/tailwindcss
+CONSOLE_CSS_IN  := internal/console/static/css/input.css
+CONSOLE_CSS_OUT := internal/console/static/css/console.css
+CONSOLE_TEMPLATES := $(shell find internal/console -name '*.tmpl' 2>/dev/null)
+
+.PHONY: install-tailwind build-css watch-css gen-keys
+
+install-tailwind: ## Install the pinned Tailwind standalone CLI into ./bin.
+	./tools/tailwindcss/install.sh
+
+$(TAILWIND_BIN):
+	./tools/tailwindcss/install.sh
+
+build-css: $(TAILWIND_BIN) $(CONSOLE_CSS_IN) $(CONSOLE_TEMPLATES) ## Build console CSS from input.css.
+	$(TAILWIND_BIN) -i $(CONSOLE_CSS_IN) -o $(CONSOLE_CSS_OUT) --minify
+
+watch-css: $(TAILWIND_BIN) ## Rebuild console CSS on template changes (dev loop).
+	$(TAILWIND_BIN) -i $(CONSOLE_CSS_IN) -o $(CONSOLE_CSS_OUT) --watch
+
+gen-keys: ## Print fresh PKGMIRROR_SESSION_AUTH_KEY / _ENC_KEY / CSRF_KEY (hex).
+	@printf 'PKGMIRROR_SESSION_AUTH_KEY=%s\n' "$$(openssl rand -hex 64)"
+	@printf 'PKGMIRROR_SESSION_ENC_KEY=%s\n'  "$$(openssl rand -hex 32)"
+	@printf 'PKGMIRROR_CSRF_KEY=%s\n'         "$$(openssl rand -hex 32)"
+
+
 # ---- Test --------------------------------------------------------------------
 
 .PHONY: test test-race test-cover test-all \

@@ -1,0 +1,7 @@
+{{ define "ui/alert" }}
+{{/* args: dict "severity" string "title" string "body" string */}}
+<div class="alert alert-{{ default "info" .severity }}" role="alert">
+  {{ if .title }}<div class="alert-title">{{ .title }}</div>{{ end }}
+  {{ if .body }}<div class="alert-body">{{ .body }}</div>{{ end }}
+</div>
+{{ end }}
