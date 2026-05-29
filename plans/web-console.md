@@ -1,10 +1,10 @@
 # Plan: Web console for pkgmirror
 
-**Status:** draft — pending user answers to §10 open questions before
-implementation begins.
+**Status:** ready — all open questions resolved. The remaining
+work is implementation per the recipe in §9.
 
-**Author:** assessment captured during a planning conversation; not
-yet reviewed.
+**Author:** assessment captured during a planning conversation;
+not yet reviewed.
 
 **Adjacent docs:** the supply-chain policy engine
 ([docs/supply-chain.md](../docs/supply-chain.md)) and the existing
@@ -888,10 +888,11 @@ session bits are load-bearing — don't skimp on them.
 
 ---
 
-## 10. Open questions (need user answers before §9 starts)
+## 10. Decisions log
 
-Five of the original seven questions have since been answered
-by the user and folded into §4/§5/§7:
+All seven of the originally-open questions are resolved. They're
+listed here as a one-stop reference so the DECISIONS.md entry
+(§13) can be written without re-deriving the rationale.
 
 - **Templating decided:** `html/template`, no templ, no HTMX (§7.1)
 - **Styling decided:** Tailwind via standalone CLI + copilot-api
@@ -905,31 +906,15 @@ by the user and folded into §4/§5/§7:
   (no SQLite session table needed). Stateless-cookie approach;
   swap for Redis/SQLite-backed store when operator count grows.
   (§5.4)
-
-Two remain.
-
-### Q1. Console + registry on the same listener, or separate ports from day 1?
-
-- **Recommendation:** same listener with route-group separation.
-  Splitting listeners means two `http.Server`s, two TLS configs,
-  two metrics paths — overhead for no clear benefit at our
-  current scale. Day-2 split into two binaries (§6.2) covers
-  the "different rate-limit policies" case better than two
-  listeners in one process would.
-
-### Q2. Routes for end-user-facing pages (per-tenant package browse without admin login), or admin-only?
-
-- **Recommendation:** admin-only for MVP. End-user-facing
-  "browse the contents of a tenant" is a separate UI concern
-  that can borrow templates later. Limits the scope and the
-  threat model for v1.
-
-### Default to all recommendations?
-
-If the user says "your call on both", proceed with:
-
-- Same listener, route-group separation
-- Admin-only console
+- **Listener layout decided:** same listener with route-group
+  separation. Day-1 deployment is one binary, one
+  `http.Server`, one Service, one Ingress. Day-2 split into
+  separate binaries (§6.2) handles the divergent-policy /
+  divergent-scale case better than two listeners in one
+  process would. (§4.3, §6.1)
+- **Console scope decided:** admin-only for MVP. End-user-facing
+  pages (per-tenant package browse without admin login) are a
+  v2 item (§11.2). Limits the v1 scope and the threat model.
 
 ---
 
@@ -1047,8 +1032,8 @@ Items intentionally deferred from the MVP:
   (including proxy-header examples for oauth2-proxy + Cloudflare
   Access + AWS ALB), and the `make build-css` /
   `make watch-css` workflow documented
-- DECISIONS.md entry capturing both §10 answers + the auth
-  tri-mode + the schema migration + the Tailwind + the
+- DECISIONS.md entry capturing all seven §10 decisions + the
+  auth tri-mode + the schema migration + the Tailwind + the
   page-package convention
 - [docs/auth.md](../docs/auth.md) updated to document the
   three middleware chains (Registry / Admin API / Console) and
