@@ -189,6 +189,10 @@ func (c *Console) Register(r *gin.Engine) error {
 	adminOnly.POST("/quarantine/:version_id/promote", c.quarantinePromote)
 	adminOnly.POST("/quarantine/:version_id/reject", c.quarantineReject)
 
+	// Audit (system admin only).
+	adminOnly.GET("/audit", c.auditList)
+	adminOnly.GET("/audit.csv", c.auditExportCSV)
+
 	return nil
 }
 

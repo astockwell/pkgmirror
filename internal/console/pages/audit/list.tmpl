@@ -1,0 +1,93 @@
+{{ define "pages/audit/list" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>Audit log</h1>
+    <p class="muted">Newest first. Every state-changing operation produces one row. Limit: 100-1000.</p>
+  </header>
+
+  <form method="get" action="/console/audit" class="audit-filter" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;align-items:flex-end">
+    <div class="field" style="margin:0">
+      <label class="field-label" for="action">Action</label>
+      <input id="action" name="action" type="text" class="field-input" value="{{ .Body.Filter.Action }}" placeholder="e.g. console.login" style="width:200px">
+    </div>
+    <div class="field" style="margin:0">
+      <label class="field-label" for="decision">Decision</label>
+      <select id="decision" name="decision" class="field-select" style="width:160px">
+        <option value="">any</option>
+        <option value="allow"      {{ if eq .Body.Filter.Decision "allow"      }}selected{{ end }}>allow</option>
+        <option value="warn"       {{ if eq .Body.Filter.Decision "warn"       }}selected{{ end }}>warn</option>
+        <option value="quarantine" {{ if eq .Body.Filter.Decision "quarantine" }}selected{{ end }}>quarantine</option>
+        <option value="deny"       {{ if eq .Body.Filter.Decision "deny"       }}selected{{ end }}>deny</option>
+      </select>
+    </div>
+    <div class="field" style="margin:0">
+      <label class="field-label" for="tenant_id">Tenant ID</label>
+      <input id="tenant_id" name="tenant_id" type="number" min="1" class="field-input" value="{{ if .Body.Filter.TenantID }}{{ .Body.Filter.TenantID }}{{ end }}" style="width:100px">
+    </div>
+    <div class="field" style="margin:0">
+      <label class="field-label" for="user_id">User ID</label>
+      <input id="user_id" name="user_id" type="number" min="1" class="field-input" value="{{ if .Body.Filter.UserID }}{{ .Body.Filter.UserID }}{{ end }}" style="width:100px">
+    </div>
+    <div class="field" style="margin:0">
+      <label class="field-label" for="limit">Limit</label>
+      <input id="limit" name="limit" type="number" min="1" max="1000" class="field-input" value="{{ .Body.Filter.Limit }}" style="width:90px">
+    </div>
+    <button type="submit" class="btn">Apply</button>
+    <a href="/console/audit" class="btn btn-ghost">Clear</a>
+    <a href="/console/audit.csv?{{ if .Body.Filter.Action }}action={{ .Body.Filter.Action }}&{{ end }}{{ if .Body.Filter.Decision }}decision={{ .Body.Filter.Decision }}&{{ end }}{{ if .Body.Filter.TenantID }}tenant_id={{ .Body.Filter.TenantID }}&{{ end }}{{ if .Body.Filter.UserID }}user_id={{ .Body.Filter.UserID }}&{{ end }}limit={{ .Body.Filter.Limit }}" class="btn">Export CSV</a>
+  </form>
+
+  {{ if .Body.Events }}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>When</th>
+        <th>Action</th>
+        <th>Actor</th>
+        <th>Tenant</th>
+        <th>Package</th>
+        <th>Decision</th>
+        <th>Reason</th>
+        <th>Request</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Body.Events }}
+      <tr>
+        <td class="muted" title="{{ timefmt .WhenUnix "2006-01-02 15:04:05" }}">{{ humanTime .WhenUnix }}</td>
+        <td><code>{{ .Action }}</code></td>
+        <td>
+          {{ if .ActorID }}#{{ .ActorID }}{{ else }}<span class="muted">anon</span>{{ end }}
+          {{ if .ActorKind }}<span class="muted">({{ .ActorKind }})</span>{{ end }}
+        </td>
+        <td class="muted">{{ if .TenantID }}#{{ .TenantID }}{{ else }}-{{ end }}</td>
+        <td>
+          {{ if .Package }}
+            {{ .Format }}/{{ .Package }}
+            {{ if .Version }} <code>{{ .Version }}</code>{{ end }}
+          {{ else }}<span class="muted">-</span>{{ end }}
+        </td>
+        <td>
+          {{ if .Decision }}
+            {{ if eq .Decision "allow" }}<span style="color:var(--success)">{{ .Decision }}</span>
+            {{ else if eq .Decision "warn" }}<span style="color:var(--warning)">{{ .Decision }}</span>
+            {{ else if eq .Decision "quarantine" }}<span style="color:var(--warning)">{{ .Decision }}</span>
+            {{ else if eq .Decision "deny" }}<span style="color:var(--danger)">{{ .Decision }}</span>
+            {{ else }}<span class="muted">{{ .Decision }}</span>{{ end }}
+          {{ else }}<span class="muted">-</span>{{ end }}
+        </td>
+        <td class="muted">{{ default "-" .Reason }}</td>
+        <td class="muted" style="font-size:0.75rem">{{ default "-" .RequestID }}</td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ if .Body.HasMore }}
+  <p class="muted" style="margin-top:12px">Showing the first {{ .Body.Filter.Limit }} rows. Narrow your filter or raise the limit.</p>
+  {{ end }}
+  {{ else }}
+  {{ template "ui/alert" (dict "severity" "info" "title" "No events match"
+        "body" "Try clearing filters or widening the window.") }}
+  {{ end }}
+</section>
+{{ end }}
