@@ -54,8 +54,11 @@ Concretely:
 
 - Console handlers live in `internal/console/`
 - HTML templates in `templates/console/`
-- Static assets (CSS/JS/favicon) in `assets/static/`
-- Mounted at `/console/...`; `/static/...` for assets
+- Static assets (CSS/JS/favicon) in `internal/console/static/`,
+  served at `/console/static/...` (namespaced under the console
+  group so a future split topology routes them with the rest of
+  the console)
+- Mounted at `/console/...`
 - `cmd/pkgmirror/main.go` reads the flag and wires the console
   group only when enabled
 
@@ -326,7 +329,7 @@ plane":
 
 Mirrors the existing API surface for visual + cognitive parity:
 
-- `/api/admin/...` → `/console/admin/...`
+- `/admin/...` → `/console/admin/...`
 - `/api/packages/:tenant/...` → `/console/t/:tenant/packages/...`
 
 System admins see both planes; tenant-only users see only their
@@ -341,7 +344,7 @@ In declining order of public-facing risk:
 | Chain | Auth | CSRF | Used by |
 | --- | --- | --- | --- |
 | Registry | PAT (Bearer / Basic / `X-NuGet-ApiKey`) | ✗ (stateless) | `/api/packages/...` |
-| Admin API | PAT (must be admin) | ✗ (stateless) | `/api/admin/...` |
+| Admin API | PAT (must be admin) | ✗ (stateless) | `/admin/...` |
 | Console | Session cookie + role gate | ✓ | `/console/...` |
 
 A request arriving at the registry routes with a session cookie
@@ -440,7 +443,7 @@ Both modes feed the same `Identity` type and the same
 `RequireRead` / `RequireWrite` helpers; the choice is which
 `Authenticator` impl the console's middleware chain mounts at
 boot. Registry routes (`/api/packages/...`,
-`/api/admin/...`) keep using `TokenAuthenticator` regardless
+`/admin/...`) keep using `TokenAuthenticator` regardless
 of console mode.
 
 ### 5.1. Mode A: trust-upstream-proxy-header (recommended for production)
@@ -663,15 +666,21 @@ csrfMW := csrf.Protect(
 )
 ```
 
-Templates access the token via a `csrfField` template func that
-calls `csrf.TemplateField(r)`:
+Templates access the pre-rendered hidden input via
+`{{ .Base.CSRFField }}`, which the console populates in
+`baseData()` via `csrf.TemplateField(gc.Request)`:
 
 ```html
 <form method="post" action="/console/admin/tenants">
-    {{ csrfField }}
+    {{ .Base.CSRFField }}
     <!-- ... -->
 </form>
 ```
+
+We deliberately do **not** ship a `{{ csrfField }}` template
+func — template funcs have no way to receive the request, and
+gorilla/csrf's token nonce lives there. The `BaseData.CSRFField`
+path is the one true way.
 
 Missing or stale token returns 403 with a friendly page (CSRF
 failure handler configured via `csrf.ErrorHandler`).
@@ -692,8 +701,8 @@ the app stays small.
 ### 6.1. Day-1 (every deployment today)
 
 ```
-Deployment: pkgmirror (1+ replicas)
-  - serves /api/packages/* + /console/* + /api/admin/*
+Deployment: pkgmirror (exactly 1 replica for SQLite)
+  - serves /api/packages/* + /console/* + /admin/*
   - PKGMIRROR_CONSOLE_ENABLED=true
 Service: pkgmirror :8080
 Ingress: pkgmirror.example.com → Service
@@ -703,24 +712,29 @@ Single Service, single Ingress, console + registry on one
 listener. Operators reach the console at `https://pkgmirror.example.com/console`;
 package clients hit the registry routes.
 
+**`1` replica, not `1+`:** SQLite's single-writer constraint
+(§3.1) means multiple writable replicas against the same
+file is unsafe. Horizontal scale is a Day-2 concern that
+arrives together with the Postgres migration; see §6.2.
+
 ### 6.2. Day-2 (when a §8 trigger fires AND Postgres migration is done)
 
 ```
 Deployment: pkgmirror-registry (N replicas)
-  - serves /api/packages/* + /api/admin/*
+  - serves /api/packages/* + /admin/*
   - PKGMIRROR_CONSOLE_ENABLED=false
   - DATABASE_URL=postgres://...
 Service: pkgmirror-registry :8080
 
 Deployment: pkgmirror-console (1-2 replicas)
-  - serves /console/* + /static/* only
+  - serves /console/* only (which includes /console/static/*)
   - PKGMIRROR_REGISTRY_ENABLED=false  (new flag to mirror)
   - DATABASE_URL=postgres://... (same database)
 Service: pkgmirror-console :8080
 
 Ingress:
-  /console/* + /static/* → pkgmirror-console Service
-  everything else        → pkgmirror-registry Service
+  /console/* → pkgmirror-console Service
+  everything else → pkgmirror-registry Service
 ```
 
 The `PKGMIRROR_REGISTRY_ENABLED` flag is the mirror image of the
@@ -841,10 +855,12 @@ toolchain commitment.**
 
 ### 7.6. Static asset story
 
-- `internal/console/static/` for everything served at `/static/...`
+- `internal/console/static/` for everything served at
+  `/console/static/...` (namespaced under the console group so
+  routing stays clean across the future split topology)
 - Bundled via `embed.FS` so deployments are single-artifact
 - Cache-bust via a build-time content hash baked into the URL
-  (e.g. `/static/css/console.css?v=<sha256>`)
+  (e.g. `/console/static/css/console.css?v=<sha256>`)
 
 ---
 
@@ -878,7 +894,7 @@ templates are mechanical once auth is solid.
 
 | # | Step | Estimate |
 | --- | --- | --- |
-| 1 | `internal/console/session/` — cookie store, SQLite-backed table + migration | 3 hours |
+| 1 | `internal/console/session/` — gorilla/sessions CookieStore wiring + flash type gob registration | 1 hour |
 | 2 | `SessionAuthenticator` + login route + logout + password set/reset + argon2id schema | 4 hours |
 | 3 | CSRF middleware | 1 hour |
 | 4 | `internal/console/handler.go` + layout template + base CSS | 2 hours |
@@ -979,7 +995,7 @@ Items intentionally deferred from the MVP:
   N=tens of operators, this is fine; for thousands it'd want a
   separate store. Not on the horizon.
 - **The "console disabled, registry only" mode** must continue
-  to serve the existing `/api/admin/...` REST routes — those are
+  to serve the existing `/admin/...` REST routes — those are
   the PAT-authenticated programmatic interface and they're not
   going away when we add a UI. Keep them as a parallel surface,
   not a console-internal API.

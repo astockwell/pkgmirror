@@ -13,28 +13,254 @@ the work lands in shippable slices rather than one giant change.
 Where the architecture plan says **what** and **why**, this
 plan says **how**.
 
+**Read §0 first.** It enumerates the cross-cutting contract
+changes (auth Identity model, route-scoped server middleware,
+schema v4, existing UI coexistence, audit semantics for console
+actors) that touch supply-chain-spine code and must be sequenced
+before the page-level work begins.
+
+---
+
+## 0. Cross-cutting contracts (must precede the PR sequence)
+
+The page conventions in §2–§13 assume five cross-cutting
+things are already true. They're not, in the current codebase.
+Each one touches code the
+[copilot-instructions.md](../.github/copilot-instructions.md)
+calls out as supply-chain-spine and deserving of human review.
+
+### 0.1. `auth.Identity` authorization model needs an auth-source field
+
+Verified by reading `internal/auth/auth.go`. Today, every
+authorization method (`CanRead`, `CanWrite`, `IsSystemAdmin`)
+calls `HasTokenScope`, which returns `false` when `Token == nil`.
+A session-authed or proxy-authed console identity (token-less by
+design) would fail every authorization check.
+
+**The change:** add a credential-kind field to `Identity` and
+gate token-scope requirements on `kind == token`:
+
+```go
+type CredentialKind int
+const (
+    CredentialToken CredentialKind = iota  // existing PAT auth
+    CredentialSession                       // console session
+    CredentialProxy                         // console proxy-header
+)
+
+type Identity struct {
+    User         *users.User
+    Token        *tokens.Token  // nil for non-token kinds
+    Memberships  map[int64]tenants.Role
+    Kind         CredentialKind
+}
+
+func (id *Identity) IsSystemAdmin() bool {
+    if id == nil || id.User == nil || !id.User.IsAdmin {
+        return false
+    }
+    switch id.Kind {
+    case CredentialToken:
+        return id.HasTokenScope(tokens.ScopeAdmin)
+    case CredentialSession, CredentialProxy:
+        return true  // browser auth carries no separate scope
+    }
+    return false
+}
+
+func (id *Identity) CanRead(tenantID int64) bool { /* same pattern */ }
+func (id *Identity) CanWrite(tenantID int64) bool { /* same pattern */ }
+```
+
+Lands as **PR 0a** (see §1). Hits `internal/auth/auth.go` plus
+any call sites in registry handlers; covered by exhaustive
+unit tests for each (kind × method) combination.
+
+Why not collapse Kind into a method on Token-pointer-nil-ness?
+Because we also want to be able to *deny* state-changing actions
+to sessions backed by a PAT bridge in v2; a real field keeps
+that door open.
+
+### 0.2. Server middleware must move from global to route-scoped
+
+Verified by reading `internal/server/server.go:59`. Today
+`r.Use(auth.Middleware(d.Authenticator))` is mounted on the
+whole engine, so every request is processed by
+`TokenAuthenticator`. The plan's three-chains design needs
+per-group mounting.
+
+**The change:** lift the global `auth.Middleware` call; mount
+it on the registry + admin REST groups individually; mount the
+console authenticator (chosen at boot per
+`PKGMIRROR_CONSOLE_AUTH_MODE`) only on the `/console` group.
+
+```go
+// internal/server/server.go (sketch after restructure)
+func New(d Deps) (*gin.Engine, error) {
+    r := gin.New()
+    r.Use(gin.Logger(), gin.Recovery())
+    r.Use(policyActorMiddleware())
+
+    tokenAuth := auth.Middleware(d.TokenAuthenticator)
+
+    // Registry routes: token auth only
+    api := r.Group("/api/packages/:tenant", tokenAuth)
+    goproxy.NewHandler(...).Register(api.Group("/go"))
+    // ... all the other formats
+
+    // Admin REST: token auth + admin gate (existing behavior)
+    admin := r.Group("/admin", tokenAuth)
+    admin.GET("/audit", ...)
+    // ...
+
+    // Container at root /v2 stays with tokenAuth too
+    container.NewHandler(...).Register(r)  // adds tokenAuth itself
+
+    // Console: separate authenticator chosen per config
+    if d.Console != nil {
+        d.Console.Register(r)  // mounts session/proxy auth + CSRF inside /console
+    }
+    return r, nil
+}
+```
+
+Lands as **PR 0b**. Touches `internal/server/server.go` and
+every registry handler that calls `auth.RequireRead` /
+`RequireWrite` (the calls themselves don't change; only the
+middleware wiring). Stress loop must be green before any
+console work merges on top.
+
+### 0.3. Schema v4 migration: `users.password_hash` + `users.password_set_unix`
+
+Current schema is at `PRAGMA user_version = 3`
+(`internal/db/db.go`). The console adds:
+
+```sql
+-- migration v4
+ALTER TABLE users ADD COLUMN password_hash TEXT;     -- argon2id encoded
+ALTER TABLE users ADD COLUMN password_set_unix INT;  -- last set timestamp
+```
+
+Both nullable. proxy-header-only deployments never populate
+them. Idempotent.
+
+**Lands as PR 2a** (see §1). The PR scope:
+
+- the migration step in `internal/db/db.go`
+- new `users.Store` methods (§0.4)
+- tests that explicitly upgrade a v3 DB and open a fresh v4 DB
+- a `DECISIONS.md` entry naming the schema bump
+- a `docs/auth.md` update distinguishing console credentials
+  from package PATs
+
+### 0.4. `users.Store` API additions
+
+Verified the current surface: `Create / GetByID / GetByName /
+GetByExternal / TouchLastSeen`. The console needs:
+
+```go
+// New in PR 2a:
+func (s *Store) GetOrCreate(ctx context.Context, name, email string) (*User, error)
+func (s *Store) SetPasswordHash(ctx context.Context, id int64, hashed string) error
+func (s *Store) VerifyPassword(ctx context.Context, name, plaintext string) (*User, error)
+func (s *Store) ClearPassword(ctx context.Context, id int64) error
+```
+
+Proxy-header users are keyed on the external
+`(provider="proxy-header", subject=<header value>)` tuple via
+the existing `GetByExternal` lookup; `GetOrCreate` is the new
+upsert that wraps it.
+
+All four methods get standard table-driven tests in PR 2a.
+
+### 0.5. Existing `internal/ui` coexists with the console
+
+Verified: the existing public UI registers `/`, `/-/healthz`,
+`/t/:tenant`, and `/t/:tenant/p/:type/*name` (Bootstrap-based,
+anonymous-readable for public tenants).
+
+**The contract:**
+
+- `internal/ui` (existing) stays at root + `/t/...`. Public-
+  facing, anonymous-readable on public tenants, no console
+  auth applied.
+- `internal/console` (new) lives at `/console/...` exclusively.
+  Authenticated, operator-facing.
+- The two share zero templates and zero static assets in v1.
+  No `/static` at root — the console serves
+  `/console/static/...` so route ownership is unambiguous.
+- v2 may fold the public UI into the console (or rebrand it),
+  but that's a separate plan.
+
+### 0.6. Audit vs logging semantics for console actors
+
+Logging (§3) and audit are different things.
+[docs/supply-chain.md](../docs/supply-chain.md) requires every
+state-changing admin action to produce an audit row, not just a
+log line.
+
+**The console adds these state changes; each emits one audit
+row:**
+
+| Action | Audit `action` | Notes |
+| --- | --- | --- |
+| login success | `console.login` | severity=info |
+| login failure | `console.login.deny` | severity=warn; rate-limit-able |
+| logout | `console.logout` | info |
+| password set/reset | `console.password.set` | info; never logs the password |
+| token mint | `tokens.mint` (existing) | already audited; ensure console actor is captured |
+| token revoke | `tokens.revoke` (existing) | same |
+| tenant create | `tenants.create` | info |
+| tenant update | `tenants.update` | info; capture changed fields |
+| tenant member add/remove | `tenants.member.add` / `remove` | info |
+| rule create/update/delete | `rules.{create,update,delete}` | info |
+| rule dry-run | (no audit; logging only) | dry-runs don't mutate |
+| quarantine promote | `quarantine.promote` | info |
+| quarantine reject | `quarantine.reject` | info |
+
+**Actor population:** existing audit rows expect both
+`actor_user_id` and `actor_token_id`. Console identities have no
+token, so:
+
+- `actor_user_id` = `Identity.User.ID`
+- `actor_token_id` = NULL
+- new column `actor_kind` (TEXT: `token` / `session` / `proxy`)
+  added in the v4 migration so audit queries can filter
+
+The `actor_kind` column addition is part of §0.3 (schema v4).
+
 ---
 
 ## 1. Phased PR sequence
 
 The §9 effort table in web-console.md lists 12 steps totaling
-~4 days. They're best landed as **eight independently
-shippable PRs**, in this order. Each PR ends with the stress
-loop green and is reviewable on its own.
+~4 days. They're best landed as **ten independently shippable
+PRs**, in this order. Each PR ends with the stress loop green
+and is reviewable on its own.
+
+**Two restructure PRs land BEFORE any console code** to address
+the §0 cross-cutting contracts. They have nothing to do with the
+console specifically; they're prerequisite cleanup to
+`internal/auth` and `internal/server`.
 
 | # | PR | What lands | Estimate |
 | --- | --- | --- | --- |
-| 1 | **foundation** | `Console` struct, embed.FS loader, layout + base CSS, `/console/_ping`, dev-dir override | 1.5 days |
-| 2 | **auth** | both modes (proxy-header + password), session, CSRF, login/logout, schema migration, rate limit | 1 day |
-| 3 | **dashboard** | `pages/home/` — first real page, read-only, exercises the layout + partials | 0.5 day |
-| 4 | **tenants** | `pages/tenants/` — list, detail, members. First page with state-changing forms + flash messages | 0.5 day |
-| 5 | **packages** | `pages/packages/` — per-tenant list + version detail + delete. First data-plane page | 0.5 day |
+| 0a | **auth Identity model** | `CredentialKind` field on `Identity`; `IsSystemAdmin` / `CanRead` / `CanWrite` switch on Kind; exhaustive unit tests; `DECISIONS.md` entry | 0.5 day |
+| 0b | **server route-scoped auth** | Lift `auth.Middleware` from global to per-group in `internal/server/server.go`; registry + admin REST keep `TokenAuthenticator`; no console code yet | 0.5 day |
+| 1 | **foundation** | `Console` struct, embed.FS loader, layout + base CSS, `/console/_ping`, dev-dir override, security headers middleware, Tailwind binary pinning | 1.5 days |
+| 2a | **schema v4 + users** | Migration for `users.password_hash` + `password_set_unix` + `audit.actor_kind`; new `users.Store` methods (`GetOrCreate`, `SetPasswordHash`, `VerifyPassword`, `ClearPassword`); migration test (v3 → v4 + fresh v4) | 0.5 day |
+| 2b | **password auth** | `SessionAuthenticator`, login/logout, gorilla/sessions CookieStore, CSRF, rate-limited login route, token-verified set-password flow for bootstrap | 0.75 day |
+| 2c | **proxy-header auth** | `ProxyHeaderAuthenticator`, trusted-proxies IP allowlist + tests for spoofed `X-Forwarded-For`, `PKGMIRROR_CONSOLE_BOOTSTRAP_ADMIN` one-shot promotion, audit row on promotion | 0.5 day |
+| 3 | **dashboard** | `pages/home/` — first real page, read-only, exercises the layout + partials. **Prerequisite helpers:** `Tenants.Count`, `Models.CountPackages`, `Models.RecentIngests`, `Audit.DecisionRollup` — list each as a PR deliverable | 0.5 day |
+| 4 | **tenants** | `pages/tenants/` — list, detail, members. First page with state-changing forms + flash messages. All destructive actions use `POST .../delete` not `DELETE ...` (HTML form constraint) | 0.5 day |
+| 5 | **packages (browse + quarantine only)** | `pages/packages/` — per-tenant list + version detail + quarantine promote/reject. **Raw delete is deferred to v2** (overlaps with quarantine forensics; needs a separate flow with confirmation + audit + retention policy) | 0.5 day |
 | 6 | **audit** | `pages/audit/` — query + detail. Read-only but exercises pagination + filtering | 0.5 day |
-| 7 | **rules** | `pages/rules/` — list, edit, dry-run preview. Most complex page; biggest form | 1 day |
+| 7 | **rules** | `pages/rules/` — list, edit, dry-run preview. Most complex page; biggest form. **Prerequisite:** rules dry-run query helper to reconstruct past `Subject` objects; carved out as its own sub-slice | 1 day |
 | 8 | **tokens + profile** | `pages/tokens/` + `pages/profile/` — mint/revoke + own-profile management | 0.5 day |
 
-PR 1 is the foundation; PR 2 unblocks all subsequent pages.
-PRs 3–8 can ship in any order after PR 2.
+PR 0a and 0b unblock everything else. PR 1 is the console
+foundation; PR 2a/b/c unblock all subsequent pages. PRs 3–8
+can ship in any order after PR 2c.
 
 For each PR after #1: copy an existing page-package as the
 template, replace the handler body, add the
@@ -73,10 +299,15 @@ Contains:
   - Executes the `layouts/base` template
 
 ```go
-// Sketch — full implementation in PR 1
+// Sketch — full implementation in PR 1.
 func (c *Console) Render(gc *gin.Context, page string, body any) {
     if !c.Config.Enabled {
         gc.String(http.StatusNotFound, "console disabled")
+        return
+    }
+    base, err := c.baseData(gc)
+    if err != nil {
+        c.RenderError(gc, "build page chrome", err)
         return
     }
     wrapper := struct {
@@ -85,15 +316,20 @@ func (c *Console) Render(gc *gin.Context, page string, body any) {
         Body any
     }{
         Page: page,
-        Base: c.baseData(gc),
+        Base: base,
         Body: body,
     }
     gc.HTML(http.StatusOK, "layouts/base", wrapper)
 }
 ```
 
-The layout template references `.Page` to pick which page
-template to embed:
+The layout template uses the `tmpl` template func
+(§2.1.templates) to dispatch on `.Page` — a tiny helper that
+looks up the named template, executes it into a buffer, and
+returns the result as `template.HTML` (errors surfaced as
+logged-and-rendered server errors). Far cleaner than a giant
+`if/else` and the only thing that scales as the page count
+grows past five.
 
 ```html
 {{ define "layouts/base" }}<!doctype html>
@@ -101,19 +337,18 @@ template to embed:
   <nav>...</nav>
   <main>
     {{ template "partials/flash" .Base.Flash }}
-    {{ if eq .Page "pages/tenants/list" }}{{ template "pages/tenants/list" .Body }}
-    {{ else if eq .Page "pages/tenants/detail" }}{{ template "pages/tenants/detail" .Body }}
-    {{ /* ... or use a registry-of-template-names ... */ }}
-    {{ end }}
+    {{ tmpl .Page .Body }}  {{/* dispatches to e.g. pages/tenants/list */}}
   </main>
-  {{ block "page-js" . }}{{ end }}
 </body></html>{{ end }}
 ```
 
-Yes, the giant `if/else` is awkward. We can clean it up with a
-template func: `{{ tmpl .Page .Body }}` where `tmpl` looks up
-and executes the named template. Add the func when the page
-count grows past ~5.
+Per-page external JS scripts come in via
+`.Base.ScriptURLs []string` (populated by the page handler
+before calling `c.Render`). Per-page inline scripts go directly
+inside the page template's body. We **deliberately do not** use
+`{{ define "page-js" }}` blocks because `html/template` has a
+flat namespace and the last-parsed wins — every page after the
+first would silently lose its scripts. See §2.3 base layout.
 
 #### ★ `internal/console/templates.go`
 
@@ -122,7 +357,9 @@ The recursive `embed.FS` walker described in web-console.md §4.5.
 
 ```go
 var funcs = template.FuncMap{
-    "csrfField":   csrfFieldFunc,    // emitted by middleware/csrf.go
+    // CSRF: NOT a func that magically receives the request — the
+    // pre-rendered hidden input is populated into BaseData.CSRFField
+    // by baseData(); templates emit it as {{ .Base.CSRFField }}.
     "default":     defaultFunc,      // {{ .X | default "fallback" }}
     "dict":        dictFunc,         // {{ template "x" (dict "k" "v") }}
     "humanBytes":  humanBytesFunc,
@@ -132,12 +369,36 @@ var funcs = template.FuncMap{
     "upper":       strings.ToUpper,
     "title":       titleFunc,
     "join":        strings.Join,
-    "tmpl":        tmplFunc,         // {{ tmpl "pages/tenants/list" .Body }}
+    "tmpl":        nil,              // bound per-request — see below
 }
 ```
 
-The `dict` func is the only non-obvious one and it's the one
-that makes UI partials usable from page templates:
+The `tmpl` template func dispatches the layout's body slot to a
+named page template. It can't be a global function value because
+it needs the template set it was parsed into; it's bound at
+parse time in `loadTemplates`:
+
+```go
+func loadTemplates(funcs template.FuncMap, overrideDir string) (*template.Template, error) {
+    // ... parse all .tmpl files as in web-console.md S4.5 ...
+    root.Funcs(template.FuncMap{
+        "tmpl": func(name string, data any) (template.HTML, error) {
+            var buf bytes.Buffer
+            if err := root.ExecuteTemplate(&buf, name, data); err != nil {
+                return "", fmt.Errorf("tmpl %q: %w", name, err)
+            }
+            return template.HTML(buf.String()), nil  //nolint:gosec // output is template-rendered, not user input
+        },
+    })
+    return root, nil
+}
+```
+
+Errors from `tmpl` surface as Go template execution errors
+(caught by `gin.Recover` middleware — renders a friendly 500).
+
+The `dict` func is the only other non-obvious one and it's the
+one that makes UI partials usable from page templates:
 
 ```go
 func dictFunc(args ...any) (map[string]any, error) {
@@ -173,14 +434,17 @@ The shared structs:
 
 ```go
 type BaseData struct {
-    Identity    *auth.Identity   // nil for anonymous
-    Memberships []*tenants.Tenant // tenants the user can access
-    ActiveTenant *tenants.Tenant  // nil unless we're under /console/t/:tenant
-    Flash       []FlashMessage    // see §6
-    CSRFField   template.HTML     // pre-rendered <input type="hidden" name="gorilla.csrf.Token" ...>
-    AppVersion  string
-    ConsolePath string             // e.g. "/console" — for href-building
-    Now         time.Time
+    Identity     *auth.Identity     // nil for anonymous
+    Memberships  []*tenants.Tenant  // tenants the user can access
+    ActiveTenant *tenants.Tenant    // nil unless we're under /console/t/:tenant
+    Flash        []FlashMessage     // see S6
+    CSRFField    template.HTML      // pre-rendered <input type="hidden" ...>, populated by baseData()
+    ScriptURLs   []string           // per-page external JS to <script src="..."> in the layout
+    AppVersion   string
+    ConsolePath  string             // e.g. "/console" — for href-building
+    DarkMode     bool               // resolved from cookie / config default
+    PageTitle    string
+    Now          time.Time
 }
 
 type FlashMessage struct {
@@ -188,6 +452,11 @@ type FlashMessage struct {
     Text     string
 }
 ```
+
+`baseData()` populates `CSRFField` via `csrf.TemplateField(c.Request)`
+(gorilla/csrf does need the request) so templates only ever
+need to emit `{{ .Base.CSRFField }}`. No magic template func
+that can't see the request.
 
 ### 2.2. Middleware (PR 1 foundation + PR 2 auth)
 
@@ -197,11 +466,18 @@ Two `Authenticator` implementations + the gate helpers. Both
 modes here, mode chosen at boot via `Console.Config.AuthMode`.
 ~200 lines.
 
+Auth code is supply-chain spine; these sketches model real error
+handling (DB failure ⇒ fail closed; missing credentials ⇒
+anonymous).
+
 ```go
 // Mode selector: returned by Console.New() based on config.
 func NewAuthenticator(cfg Config, users *users.Store, tenants *tenants.Store) (auth.Authenticator, error) {
     switch cfg.AuthMode {
     case "proxy-header":
+        if len(cfg.TrustedProxies) == 0 {
+            return nil, fmt.Errorf("PKGMIRROR_CONSOLE_TRUSTED_PROXIES required in proxy-header mode")
+        }
         return newProxyHeader(cfg, users, tenants), nil
     case "password":
         return newSession(cfg, users, tenants), nil
@@ -209,7 +485,61 @@ func NewAuthenticator(cfg Config, users *users.Store, tenants *tenants.Store) (a
         return nil, fmt.Errorf("unknown PKGMIRROR_CONSOLE_AUTH_MODE=%q", cfg.AuthMode)
     }
 }
+
+// Mode A: trust an upstream-set header from a trusted source.
+func (a *ProxyHeaderAuthenticator) Authenticate(ctx context.Context, r *http.Request) (*auth.Identity, error) {
+    if !a.isTrustedSource(r) {
+        return nil, nil  // anonymous; headers ignored unconditionally
+    }
+    user := strings.TrimSpace(r.Header.Get(a.UserHeader))
+    if user == "" {
+        return nil, nil  // anonymous
+    }
+    u, err := a.Users.GetOrCreate(ctx, user, r.Header.Get(a.EmailHeader))
+    if err != nil {
+        return nil, fmt.Errorf("proxy-header auth: get/create user %q: %w", user, err)
+    }
+    mem, err := a.Tenants.Memberships(ctx, u.ID)
+    if err != nil {
+        return nil, fmt.Errorf("proxy-header auth: memberships for user %d: %w", u.ID, err)
+    }
+    return &auth.Identity{User: u, Memberships: mem, Kind: auth.CredentialProxy}, nil
+}
+
+// Mode B: session cookie set by /console/login.
+func (a *SessionAuthenticator) Authenticate(ctx context.Context, r *http.Request) (*auth.Identity, error) {
+    sess, err := a.Sessions.Get(r, "pkgmirror_session")
+    if err != nil {
+        // gorilla/sessions returns a fresh session + err on decode failure;
+        // treat as anonymous + log so we notice persistent corruption.
+        slog.Warn("session decode failed; treating as anonymous", "err", err)
+        return nil, nil
+    }
+    uid, ok := sess.Values["user_id"].(int64)
+    if !ok {
+        return nil, nil  // not logged in
+    }
+    u, err := a.Users.GetByID(ctx, uid)
+    if err != nil {
+        if errors.Is(err, users.ErrNotExist) {
+            return nil, nil  // session for a deleted user → anonymous
+        }
+        return nil, fmt.Errorf("session auth: get user %d: %w", uid, err)
+    }
+    mem, err := a.Tenants.Memberships(ctx, u.ID)
+    if err != nil {
+        return nil, fmt.Errorf("session auth: memberships for user %d: %w", u.ID, err)
+    }
+    return &auth.Identity{User: u, Memberships: mem, Kind: auth.CredentialSession}, nil
+}
 ```
+
+The authenticator middleware in `internal/auth` already returns
+any non-nil `error` from `Authenticate` to the recovery
+middleware (which renders a 500). Returning `nil, nil` is the
+"anonymous; let route gates decide" path. **The rule:** missing
+credentials are anonymous; DB/session corruption is an error;
+console auth fails closed.
 
 Gates registered as gin middleware (called from console.go's
 Register):
@@ -221,11 +551,14 @@ func (m *Middleware) RequireAuth() gin.HandlerFunc {
         if id == nil {
             if m.AuthMode == "password" {
                 // PRG pattern: stash return-to, redirect to login
-                m.sessions.Get(c).Set("return_to", c.Request.URL.RequestURI())
-                _ = m.sessions.Get(c).Save()
+                sess := sessions.Default(c)
+                sess.Set("return_to", c.Request.URL.RequestURI())
+                if err := sess.Save(); err != nil {
+                    slog.Warn("return-to save failed", "err", err)
+                }
                 c.Redirect(http.StatusSeeOther, "/console/login")
             } else {
-                c.String(http.StatusUnauthorized, "unauthorized")
+                c.String(http.StatusUnauthorized, "unauthorized: check proxy auth headers")
             }
             c.Abort()
             return
@@ -234,14 +567,18 @@ func (m *Middleware) RequireAuth() gin.HandlerFunc {
     }
 }
 
-func (m *Middleware) RequireSystemAdmin() gin.HandlerFunc { /* ... */ }
+func (m *Middleware) RequireSystemAdmin() gin.HandlerFunc { /* checks id.IsSystemAdmin() */ }
 func (m *Middleware) RequireTenantMember() gin.HandlerFunc { /* checks :tenant param against id.Memberships */ }
 func (m *Middleware) RequireTenantAdmin() gin.HandlerFunc { /* same but role=admin */ }
 ```
 
 #### ★ `internal/console/middleware/csrf.go`
 
-Wraps gorilla/csrf as a gin middleware. ~40 lines.
+Wraps gorilla/csrf as a gin middleware. ~40 lines. The hidden
+input is exposed via `BaseData.CSRFField` (populated in
+`baseData()`), not a template func — template funcs have no
+way to receive the request, and gorilla/csrf's token nonce
+lives there.
 
 ```go
 func CSRF(secretKey []byte, secure bool) gin.HandlerFunc {
@@ -266,24 +603,66 @@ func csrfErrorPage(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-The `csrfField` template func reads from the request and emits
-the hidden input — wired in `console.go`'s funcs map:
+`baseData()` populates `BaseData.CSRFField` once per request:
 
 ```go
-func csrfFieldFunc(c *gin.Context) template.HTML {
-    return csrf.TemplateField(c.Request)
+// internal/console/console.go (part of baseData)
+base.CSRFField = csrf.TemplateField(gc.Request)
+```
+
+Templates use `{{ .Base.CSRFField }}` (see §5.2).
+
+#### ★ `internal/console/middleware/securityheaders.go` (new for PR 1)
+
+Baseline browser security headers on every `/console` response.
+This is non-negotiable for an admin UI.
+
+```go
+func SecurityHeaders(usingTLS bool) gin.HandlerFunc {
+    return func(c *gin.Context) {
+        h := c.Writer.Header()
+        // CSP: no inline scripts (we use external scripts + ScriptURLs);
+        // no inline styles either; allow our own font + asset origin only.
+        h.Set("Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self'; "+
+            "img-src 'self' data:; font-src 'self'; "+
+            "frame-ancestors 'none'; base-uri 'self'")
+        h.Set("X-Content-Type-Options", "nosniff")
+        h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+        h.Set("X-Frame-Options", "DENY")   // redundant with CSP frame-ancestors but defensive
+        if usingTLS {
+            h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        }
+        c.Next()
+    }
 }
 ```
+
+The CSP choice of `script-src 'self'` is exactly why we removed
+`{{ define "page-js" }}` blocks — inline scripts would violate
+the policy. All console JS lives in `/console/static/js/*.js`
+files.
 
 #### ○ `internal/console/middleware/session.go`
 
 Direct gin-contrib/sessions wiring. ~30 lines. Cookie-only store
 (no SQLite session table per web-console.md §5.4).
 
+**Key encoding:** env vars are **hex-encoded** strings. The
+config loader decodes once and validates the decoded byte
+length. Mixing "64 hex chars" with "64 bytes" is a real bug —
+the v0.1 of this plan had that mismatch.
+
 ```go
 func NewSessionMiddleware(cfg Config) (gin.HandlerFunc, error) {
-    if len(cfg.SessionAuthKey) != 64 || len(cfg.SessionEncKey) != 32 {
-        return nil, fmt.Errorf("session keys: need 64 byte auth + 32 byte enc")
+    // cfg.SessionAuthKey and cfg.SessionEncKey are []byte values
+    // already decoded from hex by config.Load() (see S8.1).
+    // Auth key: 64 raw bytes. Enc key: 32 raw bytes.
+    if len(cfg.SessionAuthKey) != 64 {
+        return nil, fmt.Errorf("session auth key: need 64 bytes after hex decode, got %d", len(cfg.SessionAuthKey))
+    }
+    if len(cfg.SessionEncKey) != 32 {
+        return nil, fmt.Errorf("session enc key: need 32 bytes after hex decode, got %d", len(cfg.SessionEncKey))
     }
     store := cookie.NewStore(cfg.SessionAuthKey, cfg.SessionEncKey)
     store.Options(sessions.Options{
@@ -376,8 +755,8 @@ The HTML shell. ~80 lines. Sections:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{ .Base.PageTitle | default "pkgmirror" }}</title>
-  <link rel="stylesheet" href="/static/css/console.css?v={{ .Base.AppVersion }}">
-  <link rel="icon" href="/static/favicon.ico">
+  <link rel="stylesheet" href="/console/static/css/console.css?v={{ .Base.AppVersion }}">
+  <link rel="icon" href="/console/static/favicon.ico">
 </head>
 <body class="bg-background text-foreground antialiased">
   <div class="flex min-h-screen">
@@ -388,14 +767,21 @@ The HTML shell. ~80 lines. Sections:
       {{ tmpl .Page .Body }}
     </main>
   </div>
-  <script src="/static/js/console.js?v={{ .Base.AppVersion }}" defer></script>
-  {{ block "page-js" . }}{{ end }}
+  <script src="/console/static/js/console.js?v={{ .Base.AppVersion }}" defer></script>
+  {{/* Per-page external JS via Base.ScriptURLs; no inline scripts — see S2.1 and S2.2 security headers (CSP forbids inline). */}}
+  {{ range .Base.ScriptURLs }}
+  <script src="{{ . }}" defer></script>
+  {{ end }}
 </body>
 </html>{{ end }}
 ```
 
-The `tmpl` func is the template-name dispatcher; alternative is
-the giant `if/else` shown above.
+**No `{{ define "page-js" }}` block** — `html/template` has a
+flat namespace; multiple page templates defining the same block
+name would silently overwrite each other. Per-page scripts come
+in via `BaseData.ScriptURLs []string`, populated by the handler
+before calling `c.Render`. Inline scripts are forbidden by the
+CSP set in `middleware/securityheaders.go`.
 
 #### `internal/console/layouts/auth.tmpl`
 
@@ -488,6 +874,19 @@ func dashboard(c *console.Console) gin.HandlerFunc {
 }
 ```
 
+**Prerequisite helpers** for PR 3 — these methods do not exist
+in the current codebase and must land as part of PR 3:
+
+- `tenants.Store.Count(ctx) (int, error)`
+- `models.Store.CountPackages(ctx) (int, error)`
+- `models.Store.RecentIngests(ctx, limit) ([]IngestRow, error)`
+- `audit.Logger.DecisionRollup(ctx, since, until) (map[string]int64, error)`
+
+List them in the PR 3 description so reviewers know about the
+cross-package work. Same pattern for PR 7 (rules dry-run
+needs a `Subject`-reconstructor query helper, carved out as
+its own sub-slice within the PR).
+
 The pattern is dictated: parse params, call services, build the
 typed Data struct, call `c.Render`. No anonymous structs. No
 direct `gc.HTML` calls. Errors go through `c.RenderError` (§4).
@@ -578,7 +977,11 @@ state-changing handler follows it.
 @import "tailwindcss";
 
 /* Theme tokens lifted from copilot-api/cmd/admin/static/css/.
-   shadcn/ui-derived color variables; MIT-compatible. */
+ * Those are in turn a port of shadcn/ui's design tokens
+ * (https://ui.shadcn.com, MIT). Both upstreams are MIT-licensed
+ * and reuse is explicit; this comment is the source-of-record
+ * attribution per the project's no-silent-derived-files rule.
+ */
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
@@ -606,8 +1009,10 @@ state-changing handler follows it.
 
 Vanilla JS for two global behaviors: dark-mode toggle
 persistence + dismissible flash messages. ~50 lines. Per-page
-JS goes in `{{ define "page-js" }}` blocks in individual page
-templates (web-console.md §4.9).
+JS is added by appending URLs to `BaseData.ScriptURLs` in the
+handler before calling `c.Render`; the layout iterates them and
+emits `<script src="..." defer>` tags. No inline scripts — the
+CSP set in `middleware/securityheaders.go` forbids them.
 
 #### `internal/console/tailwind.config.js`
 
@@ -787,6 +1192,32 @@ the same friendly message.
 | Backgrounded job kicked off | Flash (info, "Started rebuilding indexes; this may take a moment.") |
 | Bulk action partial success | Flash (warning, "Quarantined 12 of 14 versions. 2 failed: …") |
 
+### 4.5. Audit vs logging
+
+Logging (§3) and audit are different. Logs are operational
+breadcrumbs for ops; audit rows are compliance / forensic /
+supply-chain artifacts queryable via `/admin/audit`.
+
+Every state-changing console action produces exactly one
+audit row, per the table in §0.6 (Cross-cutting contracts).
+Logging continues independently — a state change emits both
+an audit row AND an `Info` slog line, by convention.
+
+Non-state-changing actions (page loads, search, dry-runs) emit
+logs only; no audit rows.
+
+Actor population on audit rows:
+
+- `actor_user_id` = `Identity.User.ID` (always present for
+  authenticated console requests)
+- `actor_token_id` = NULL for session/proxy console identities
+  (no token involved)
+- `actor_kind` = `"session"` or `"proxy"` (the new column
+  added in the v4 migration; see §0.6)
+
+A dashboard widget on `/console/` can show "recent actions by
+me" by filtering audit on `actor_user_id = me`.
+
 ---
 
 ## 5. Form handling conventions
@@ -817,18 +1248,18 @@ field-level error messages. The form template:
 ```html
 {{ define "pages/tenants/new" }}
 <form method="post" action="/console/admin/tenants">
-  {{ csrfField }}
+  {{ .Base.CSRFField }}
   {{ template "ui/formfield" (dict
         "label" "Name"
         "name" "name"
-        "value" .Name
-        "error" (index .Errors "name")
+        "value" .Body.Name
+        "error" (index .Body.Errors "name")
         "required" true) }}
   {{ template "ui/formfield" (dict
         "label" "Visibility"
         "name" "visibility"
-        "value" .Visibility
-        "error" (index .Errors "visibility")
+        "value" .Body.Visibility
+        "error" (index .Body.Errors "visibility")
         "type" "select"
         "options" (slice "public" "private")) }}
   <button type="submit">Create</button>
@@ -836,14 +1267,24 @@ field-level error messages. The form template:
 {{ end }}
 ```
 
-The `ui/formfield` partial handles the error display + the
-input population uniformly. Five lines per field is the bar.
+Note `.Base.CSRFField` (not `{{ csrfField }}`) and `.Body.Name`
+(not `.Name`) — the page template receives the wrapper struct
+`{Base, Body}` defined in §2.1. The `ui/formfield` partial
+handles the error display + the input population uniformly.
+Five lines per field is the bar.
 
 ### 5.3. CSRF tokens
 
-Every form: `{{ csrfField }}` at the top. The template func is
-already wired (§2.2). Forgetting it means the POST 403s and the
-user sees the friendly CSRF error page — fail loud.
+Every form: `{{ .Base.CSRFField }}` at the top. The hidden
+input is populated in `baseData()` via
+`csrf.TemplateField(gc.Request)` (see §2.2 csrf middleware).
+Forgetting it means the POST 403s and the user sees the
+friendly CSRF error page — fail loud.
+
+We deliberately do **not** ship a `{{ csrfField }}` template
+func, because template funcs have no way to receive the request
+and gorilla/csrf's token nonce lives there. The `.Base.CSRFField`
+path is the one true way.
 
 Test fixture (§2.7) handles tokens automatically by GET-ing the
 form page first, scraping the token, and including it in the
@@ -918,7 +1359,10 @@ keeps the threat surface tiny.
 ## 7. The bootstrap admin user story
 
 Day-1 deployment needs a way for the first admin to log in.
-Two scenarios:
+Both scenarios are handled **inside the existing binary** with
+no new CLI subcommands — the `cmd/pkgmirror/` server binary is
+the only entry point today and adding a subcommand framework
+is out of scope for the console work.
 
 ### 7.1. Mode=proxy-header
 
@@ -926,33 +1370,64 @@ The first user to reach `/console/` with a trusted-source request
 + the configured user header set:
 
 1. Triggers `Users.GetOrCreate` — a `users` row is auto-created
+   (only when the source IP matches `TRUSTED_PROXIES`)
 2. Has **no admin role** by default — sees only their own
    profile + tenants they're already members of
 
-So how does the first admin get admin? One of:
+First-admin promotion via env var:
 
-- Bootstrap admin grant: an env var
-  `PKGMIRROR_CONSOLE_BOOTSTRAP_ADMIN=alice@example.com` that,
-  if set, auto-promotes the named user the first time they log
-  in (one-shot; logged loudly)
-- Out-of-band: an operator runs
-  `pkgmirror admin promote alice@example.com` (the existing CLI)
+- `PKGMIRROR_CONSOLE_BOOTSTRAP_ADMIN=alice@example.com`
+- On every login, if the env var is set AND the resolved user's
+  name/email matches AND the user is not already an admin: set
+  `users.is_admin = true`, write an `audit.actor.promote` row
+  with `severity=warn` and `reason=bootstrap_env_var`, log
+  loudly ("BOOTSTRAP ADMIN PROMOTION: alice@example.com…")
+- After the first promotion, subsequent matching logins are
+  no-ops (the env var is convergent, not repeated)
+- Operators are expected to *unset* the env var after the first
+  promotion succeeds; the docs say so but we don't enforce it,
+  since the no-op behavior makes leaving it set harmless
 
-The env-var path is simpler for an initial deploy; the CLI is
-the right answer afterwards.
+Group-to-role mapping from `X-Forwarded-Groups` is **deferred to
+v2** (web-console.md §11). The first admin is the only special
+case; subsequent admin grants happen through the regular console
+flow.
 
 ### 7.2. Mode=password
 
-The bootstrap admin token (the existing `PKGMIRROR_ADMIN_TOKEN`
-mechanism) already creates a `users` row for the admin. That
-user can `pkgmirror admin set-password <user>` from the CLI to
-set their initial password, then log into the console.
+The bootstrap admin token (`PKGMIRROR_ADMIN_TOKEN`) already
+creates a `users` row for the admin. That user has no password
+set.
 
-A friendlier flow for "no password set yet" users: when an
-existing-but-passwordless user hits `/console/login`, they get
-a "Set a password first" page that requires their PAT for
-verification, then sets the password. Same wire as a normal
-password reset, just bootstrapped by token instead of email.
+**Token-verified set-password flow** (entirely in the console,
+no CLI):
+
+1. Admin loads `/console/login` for the first time
+2. Submits username (no password yet) + their PAT in a single
+   form field labeled "Personal Access Token (one time)"
+3. The handler:
+   - Looks up the user by name
+   - Verifies the supplied PAT belongs to that user via
+     `tokens.Store.Lookup` (the same path the registry uses)
+   - If both match: shows the set-password form
+   - If anything fails: same rate-limited generic
+     authentication-failed page (don't leak whether the user
+     exists or the token is wrong)
+4. Admin sets a password; `users.Store.SetPasswordHash` writes
+   the argon2id-encoded value; session cookie issued; redirect
+   to `/console/`
+5. Next login is the normal username/password flow; the PAT is
+   no longer required
+
+Same flow works as a self-service password reset (forgot-my-
+password): the user still has their PAT issued at account
+creation, that's the recovery secret. If they lost both the
+password and the PAT, a system admin clears the password via
+the console's user-management page (PR 8) and the user starts
+over with a fresh PAT from a system admin.
+
+This means we never need a `pkgmirror admin set-password` CLI
+subcommand. The token-as-bootstrap-secret pattern is enough.
 
 ### 7.3. The README documents both
 
@@ -968,25 +1443,37 @@ are `PKGMIRROR_CONSOLE_*`. The full v1 list:
 
 | Var | Default | Notes |
 | --- | --- | --- |
-| `PKGMIRROR_CONSOLE_ENABLED` | `true` | Wires/strips the `/console` + `/static` route groups |
+| `PKGMIRROR_CONSOLE_ENABLED` | `true` | Wires/strips the `/console` route group |
 | `PKGMIRROR_CONSOLE_AUTH_MODE` | `password` | `proxy-header` or `password` |
 | `PKGMIRROR_CONSOLE_AUTH_USER_HEADER` | `X-Forwarded-User` | proxy-header mode only |
 | `PKGMIRROR_CONSOLE_AUTH_EMAIL_HEADER` | `X-Forwarded-Email` | proxy-header mode only; optional |
-| `PKGMIRROR_CONSOLE_AUTH_GROUPS_HEADER` | `X-Forwarded-Groups` | proxy-header mode only; optional |
+| `PKGMIRROR_CONSOLE_AUTH_GROUPS_HEADER` | `X-Forwarded-Groups` | proxy-header mode only; optional; v2 honors |
 | `PKGMIRROR_CONSOLE_TRUSTED_PROXIES` | _(empty)_ | proxy-header mode: comma-separated IP/CIDR allowlist. **Required** in proxy-header mode; boot fails loud if empty |
-| `PKGMIRROR_CONSOLE_BOOTSTRAP_ADMIN` | _(empty)_ | proxy-header mode: username/email that gets auto-promoted to admin on first login |
-| `PKGMIRROR_SESSION_AUTH_KEY` | _(generated)_ | 64 bytes hex; if unset, generated and printed once on boot |
-| `PKGMIRROR_SESSION_ENC_KEY` | _(generated)_ | 32 bytes hex; if unset, generated and printed once on boot |
-| `PKGMIRROR_CSRF_KEY` | _(generated)_ | 32 bytes hex; if unset, generated and printed once on boot |
+| `PKGMIRROR_CONSOLE_BOOTSTRAP_ADMIN` | _(empty)_ | proxy-header mode: username/email auto-promoted to admin on first matching login. Convergent: re-running after promotion is a no-op |
+| `PKGMIRROR_SESSION_AUTH_KEY` | _(generated, dev only)_ | Hex-encoded 64-byte key (128 hex chars). Required in production password mode; see below |
+| `PKGMIRROR_SESSION_ENC_KEY` | _(generated, dev only)_ | Hex-encoded 32-byte key (64 hex chars). Required in production password mode |
+| `PKGMIRROR_CSRF_KEY` | _(generated, dev only)_ | Hex-encoded 32-byte key (64 hex chars). Required in production. CSRF applies in both auth modes |
+| `PKGMIRROR_CONSOLE_ALLOW_EPHEMERAL_KEYS` | `false` | Production override allowing missing keys (generates on boot + logs). Dev fills this in automatically |
 | `PKGMIRROR_SESSION_TTL` | `24h` | Go duration string |
 | `PKGMIRROR_CONSOLE_DEV_DIR` | _(empty)_ | Dev only: path to load templates + static from disk instead of embed |
 | `PKGMIRROR_CONSOLE_DARK_MODE_DEFAULT` | `auto` | `auto` (follow OS), `light`, `dark` |
 
-**Generated keys printed once on boot:** matches the existing
-`PKGMIRROR_ADMIN_TOKEN` pattern. Operators must capture them on
-first boot and set them as env vars for restart-stability.
+**Keys are hex-encoded.** Config loader decodes once and
+validates byte length (see §2.2 session middleware). Mixing
+"64 hex chars" with "64 bytes" was a bug in an earlier draft.
 
-A `make gen-keys` target prints fresh values to copy:
+**Boot behavior for missing keys:**
+
+- **Dev** (gin in debug mode OR `PKGMIRROR_CONSOLE_DEV_DIR` set):
+  generate ephemeral keys, print them, log a warning. Sessions
+  + CSRF tokens invalidate on every restart — fine for dev.
+- **Production** (gin release mode + no dev dir): require
+  explicit keys. Boot fails with a clear error pointing at
+  `make gen-keys`. Setting
+  `PKGMIRROR_CONSOLE_ALLOW_EPHEMERAL_KEYS=true` overrides this
+  for operators who genuinely want the dev behavior in prod.
+
+A `make gen-keys` target prints fresh values:
 
 ```makefile
 gen-keys:
@@ -994,6 +1481,9 @@ gen-keys:
 	@printf 'PKGMIRROR_SESSION_ENC_KEY=%s\n'  "$$(openssl rand -hex 32)"
 	@printf 'PKGMIRROR_CSRF_KEY=%s\n'         "$$(openssl rand -hex 32)"
 ```
+
+Values are 128 / 64 / 64 hex chars respectively, decoding to
+64 / 32 / 32 raw bytes — matching the byte-length validators.
 
 ### 8.1. Config loading shape
 
@@ -1049,32 +1539,45 @@ r.StaticFS("/static", http.FS(staticFS))
 
 ## 10. The first PR's vertical slice
 
-PR 1 ships **only**:
+PR 1 (foundation, after PR 0a/0b land) ships **only**:
 
 - `console.go` + `embed.go` + `types.go` + `templates.go`
-- `middleware/recover.go` + `requestid.go` + `accesslog.go` + `session.go` + `csrf.go`
+- `middleware/recover.go` + `requestid.go` + `accesslog.go` + `session.go` + `csrf.go` + `securityheaders.go`
 - `layouts/base.tmpl` + `layouts/auth.tmpl`
 - `partials/flash.tmpl` + `sidebar.tmpl` + `breadcrumb.tmpl`
 - `partials/ui/{button,card,alert}.tmpl` (start with three)
 - `static/css/{input.css,console.css}` + `tailwind.config.js`
 - `static/js/console.js` + `static/favicon.ico`
-- `tools/tailwindcss/install.sh` + Makefile `build-css` / `watch-css` / `gen-keys`
-- `cmd/pkgmirror/main.go` wiring (read config, construct Console, call Register if enabled)
+- `tools/tailwindcss/install.sh` — pins the standalone CLI
+  version + verifies the binary's SHA-256 + maps Darwin/Linux
+  amd64/arm64; vendors to `$(BIN_DIR)/tailwindcss`
+- Makefile `build-css` / `watch-css` / `gen-keys` targets
+- `cmd/pkgmirror/main.go` wiring (read console config, construct
+  Console, call `Register` if enabled — only after PR 0b's
+  route-scoped middleware restructure)
 - A single `GET /console/_ping` that renders a minimal page
   using the layout + a sample flash + sample UI partial
 
 Acceptance for PR 1:
 
-- `make build-css && go build && ./bin/pkgmirror` boots
+- `make build-css && make build && ./bin/pkgmirror` boots
 - `curl http://localhost:8080/console/_ping` returns HTML with
-  the layout chrome
+  the layout chrome and the security headers from
+  `securityheaders.go` (Content-Security-Policy, X-Content-Type-
+  Options, X-Frame-Options, Referrer-Policy; HSTS when TLS)
 - Setting `PKGMIRROR_CONSOLE_ENABLED=false` cleanly removes the
   route
 - Setting `PKGMIRROR_CONSOLE_DEV_DIR=internal/console` and
   editing a template reflects on refresh without rebuild
-- `make gen-keys` prints valid keys
+- `make gen-keys` prints values that boot accepts as keys
+- `make build` (no Tailwind installed on the build host) still
+  succeeds because the committed `console.css` is what gets
+  embedded — CI's unit-test job doesn't need Tailwind
+- `tools/tailwindcss/install.sh` exits non-zero if the
+  downloaded binary's SHA-256 doesn't match the pinned value
 
-Once PR 1 lands, PRs 2–8 are all "more of the same."
+Once PR 1 lands, PRs 2a/2b/2c are the security-sensitive
+foundation; PRs 3–8 are all "more of the same."
 
 ---
 
@@ -1103,6 +1606,51 @@ Both auth modes get covered: tests run with mode=password
 (default for tests), plus a per-page `_proxy_test.go` that
 exercises mode=proxy-header.
 
+### 11.1. Test fixture must handle the macOS APFS SQLite-cleanup race
+
+Per [.github/copilot-instructions.md](../.github/copilot-instructions.md),
+every grey-box fixture closes the DB and explicitly
+`os.RemoveAll`s the temp dir in `t.Cleanup`. The console
+`testutil.New` follows the existing pattern:
+
+```go
+t.Cleanup(func() {
+    _ = db.Close()
+    _ = os.RemoveAll(dir)  // load-bearing on macOS APFS
+})
+```
+
+### 11.2. PR 2 (a/b/c) threat-model test matrix
+
+The auth PRs warrant a dedicated security test matrix, separate
+from the per-page tests. Each row is its own table-driven test
+in `internal/console/middleware/auth_test.go` (and the related
+rate-limit + CSRF tests):
+
+| Scenario | Expected |
+| --- | --- |
+| **proxy-header**: trusted source + user header → identity | resolves; user auto-created if new |
+| **proxy-header**: untrusted source + user header → anonymous | header IGNORED; no user creation |
+| **proxy-header**: trusted source + spoofed `X-Forwarded-For` header from untrusted upstream | the spoof DOESN'T promote the source to trusted (use the immediate remote addr, not the forwarded chain, unless explicitly configured) |
+| **proxy-header**: empty `TRUSTED_PROXIES` at boot | boot FAILS LOUD with a clear error |
+| **proxy-header**: bootstrap admin env var matches + user not admin | promote + audit row + log |
+| **proxy-header**: bootstrap admin env var matches + user already admin | no-op; no duplicate audit row |
+| **password**: login attempt 1-10 within 60s | accepted (or denied if creds wrong) |
+| **password**: login attempt 11 within 60s | 429 Too Many Requests; rate limit fires |
+| **password**: rate limit uses centralized client-IP resolver | spoofed `X-Forwarded-For` does NOT bypass rate limit unless from a trusted proxy |
+| **password**: valid login | session cookie set; redirect to `return_to` or `/console/` |
+| **password**: invalid login | inline error on form; same wording for both "user doesn't exist" and "wrong password" (don't leak which) |
+| **password**: token-verified set-password flow | accepts user+PAT, sets hash, issues session |
+| **password**: session expired | redirect to `/console/login`; `return_to` stashed |
+| **CSRF**: POST without token | 403 + friendly page |
+| **CSRF**: POST with stale token | 403 + friendly page |
+| **session auth**: DB error during user lookup | request fails with 500 (fail closed) |
+| **proxy-header auth**: DB error during GetOrCreate | request fails with 500 (fail closed) |
+
+The centralized client-IP resolver (`console.ClientIP(r,
+trusted)`) gets its own table-driven test for trusted-proxy
+hop walking.
+
 ---
 
 ## 12. What lands in DECISIONS.md
@@ -1121,20 +1669,47 @@ See [plans/web-console.md] for architecture and
 
 - Templating: html/template, no templ, no HTMX
 - Styling: Tailwind via standalone CLI + copilot-api theme tokens
-- Auth: dual mode (proxy-header + password), configurable
+- Auth: dual-mode (proxy-header + password), configurable
 - CSRF: gorilla/csrf
 - Sessions: gorilla/sessions CookieStore (no SQLite table)
 - Listener: same listener as registry (route-group separation)
 - Scope: admin-only for MVP
+
+**Cross-cutting contract changes** (PRs 0a and 0b):
+
+- `auth.Identity` grew a `CredentialKind` field;
+  `IsSystemAdmin` / `CanRead` / `CanWrite` switch on Kind so
+  session/proxy identities (Token=nil) authorize correctly
+  without weakening token-auth scopes for registry/admin APIs
+- `internal/server/server.go` lifted `auth.Middleware` from
+  global to route-scoped; registry + admin REST keep
+  TokenAuthenticator; /console mounts its own authenticator
+
+**Schema migration (v3 → v4):**
+
+- `users.password_hash` + `users.password_set_unix` (both
+  nullable; idempotent; proxy-header-only deployments never
+  touch them)
+- `audit_log.actor_kind` (TEXT: 'token' / 'session' / 'proxy')
+  so audit queries can filter by credential source
+
+**New direct deps:**
+
+- `github.com/gorilla/csrf` (CSRF middleware)
+- `github.com/gorilla/sessions` (transitive through gin-contrib)
+- `github.com/gin-contrib/sessions` (gin wrapper)
+- `golang.org/x/crypto/argon2` (was indirect; now direct for password hashing)
 
 **Trade-offs accepted:**
 
 - Tailwind CSS file churns in git on every template change
 - Visual match to copilot-api is approximate, not pixel-for-pixel
 - Session size capped at ~4 KB (cookie limit); fine at our scale
-
-**Schema additions:** `password_hash` + `password_set_unix` columns
-on `users`. Nullable. Idempotent migration.
+- Production password mode requires explicit session/CSRF keys
+  (or an explicit `PKGMIRROR_CONSOLE_ALLOW_EPHEMERAL_KEYS=true`)
+- Raw package delete deferred to v2; only quarantine workflow
+  in v1
+- Group-to-role mapping from proxy headers deferred to v2
 ```
 
 Subsequent PRs append their own short entries only for *new*
@@ -1162,3 +1737,28 @@ the work. Listed here so reviewers don't ask:
 
 If any of these turn into a debate during a PR review, the
 reviewer's preference wins; this plan does not have an opinion.
+
+### 13.1. Rules this plan DOES enforce
+
+The positive complement to §13's negatives:
+
+- **No silent errors in auth code.** Both `Authenticator`
+  implementations (§2.2) return real errors on DB or session
+  corruption; only missing credentials become anonymous. Console
+  auth fails closed.
+- **All destructive actions use POST**, not DELETE (HTML form
+  constraint).
+- **All state-changing actions produce an audit row** per the
+  table in §0.6. Logging is separate from audit.
+- **POST-Redirect-GET is mandatory** for successful state
+  changes (§5.1).
+- **CSRF tokens on every form** via `{{ .Base.CSRFField }}`
+  (§5.3).
+- **Hex-encoded keys in env vars; byte-length validated after
+  decode** (§2.2 session, §8).
+- **No `{{ define "page-js" }}` blocks** — flat template
+  namespace; collisions silently overwrite (§2.3).
+- **No template func receives the request.** CSRF + identity
+  go via `BaseData` (§2.1 types, §2.2 csrf).
+- **Test fixtures close the DB then `os.RemoveAll`** the temp
+  dir in `t.Cleanup` (§11.1).
