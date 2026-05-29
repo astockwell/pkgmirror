@@ -420,69 +420,262 @@ Today's [internal/auth/](../internal/auth/) is PAT-only (Bearer
 clients, **wrong model for a browser console** — operators
 shouldn't type `pkm_*` tokens into HTML forms.
 
-### 5.1. What the console needs
+The console supports **two auth modes**, selected per deployment
+via `PKGMIRROR_CONSOLE_AUTH_MODE`:
 
-- **Session cookies** — signed, `HttpOnly`, `Secure` (when TLS),
-  `SameSite=Lax`, stored server-side (SQLite-backed table or
-  in-memory map gated by config)
-- **CSRF tokens** on every state-changing form (rule edit,
-  quarantine, token revoke, etc.)
-- **Login flow** — at minimum, username + password against tenant
-  users; OIDC against an external IdP later
-- **Session-from-PAT bridge** — a way for `curl`-driven console
-  use to convert a PAT into a session cookie, with a different
-  cookie name so the two paths don't tangle
+| Mode | When to use | What pkgmirror does |
+| --- | --- | --- |
+| **`proxy-header`** | Production behind a corporate auth proxy | Trusts a request header set by the upstream proxy; resolves it to an `Identity` |
+| **`password`** | Laptop dev, small/standalone deployments | Built-in username + password login with argon2id, session cookies, rate-limited |
 
-### 5.2. Implementation shape
+Both modes feed the same `Identity` type and the same
+`RequireRead` / `RequireWrite` helpers; the choice is which
+`Authenticator` impl the console's middleware chain mounts at
+boot. Registry routes (`/api/packages/...`,
+`/api/admin/...`) keep using `TokenAuthenticator` regardless
+of console mode.
 
-`internal/auth/` grows a second `Authenticator` impl:
+### 5.1. Mode A: trust-upstream-proxy-header (recommended for production)
 
-```go
-type SessionAuthenticator struct {
-    Sessions *session.Store  // new
-    Users    *users.Store
-    Tenants  *tenants.Store
-}
+The canonical "deploy a web app behind an SSO proxy" pattern
+(known variously as **trusted header authentication**,
+**forward auth**, or **reverse proxy authentication**). The
+proxy terminates SSO; the app reads the resulting identity from
+an agreed-upon HTTP header.
 
-func (a *SessionAuthenticator) Authenticate(ctx, r) (*Identity, error) {
-    cookie, err := r.Cookie("pkgmirror_session")
-    if err != nil { return nil, nil }  // anonymous
-    sess, err := a.Sessions.Get(ctx, cookie.Value)
-    if err != nil { return nil, nil }
-    if sess.ExpiresUnix < time.Now().Unix() { return nil, nil }
-    u, _ := a.Users.GetByID(ctx, sess.UserID)
-    mem, _ := a.Tenants.Memberships(ctx, u.ID)
-    return &Identity{User: u, Memberships: mem}, nil  // Token field left nil
-}
+Reference table of mainstream proxies and the headers they emit:
+
+| Proxy | Username header | Email/groups header | Signature |
+| --- | --- | --- | --- |
+| **oauth2-proxy** | `X-Forwarded-User` | `X-Forwarded-Email`, `X-Forwarded-Groups` | none by default |
+| **Authelia** | `Remote-User` | `Remote-Email`, `Remote-Groups`, `Remote-Name` | none by default |
+| **AWS ALB OIDC** | `x-amzn-oidc-identity` | `x-amzn-oidc-data` | signed JWT |
+| **Cloudflare Access** | `Cf-Access-Authenticated-User-Email` | `Cf-Access-Jwt-Assertion` | signed JWT |
+| **Tailscale Serve / Funnel** | `Tailscale-User-Login` | `Tailscale-User-Name` | network-layer (Tailnet only) |
+| **Pomerium** | `X-Pomerium-Authenticated-User-Email` | `X-Pomerium-Jwt-Assertion` | signed JWT |
+| **Vouch Proxy** | `X-Vouch-User` | `X-Vouch-IdP-Claims-*` | none by default |
+| **Google IAP** | `X-Goog-Authenticated-User-Email` | `X-Goog-IAP-JWT-Assertion` | signed JWT |
+| **Nginx `auth_request`** | configurable | configurable | configurable |
+
+Vendor-neutral config:
+
+```sh
+PKGMIRROR_CONSOLE_AUTH_MODE=proxy-header
+PKGMIRROR_CONSOLE_AUTH_USER_HEADER=X-Forwarded-User      # default
+PKGMIRROR_CONSOLE_AUTH_EMAIL_HEADER=X-Forwarded-Email    # default; optional
+PKGMIRROR_CONSOLE_AUTH_GROUPS_HEADER=X-Forwarded-Groups  # default; optional
+PKGMIRROR_CONSOLE_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12  # REQUIRED safety knob
 ```
 
-The shared `Identity` type and `RequireRead` / `RequireWrite`
-helpers stay the same — they don't care which middleware
-populated the context.
+The `TRUSTED_PROXIES` allowlist is **load-bearing**. Without
+it, any internet request setting `X-Forwarded-User: admin`
+logs in as admin. The middleware order is:
 
-Console handlers wire `SessionAuthenticator` via a separate
-middleware chain registered only inside the `/console` group;
-registry routes keep using `TokenAuthenticator`. A request
-arriving at the registry routes with a session cookie but no
-Bearer/Basic header reads as anonymous — by design.
+1. Check `r.RemoteAddr` against the allowlist (or the last hop
+   of `X-Forwarded-For` if behind an L7 LB — documented per
+   deployment)
+2. If the source isn't trusted, ignore the auth headers
+   entirely (treat as anonymous)
+3. Only after the IP check, read the configured user header
+   and resolve the identity from `internal/users/`
 
-### 5.3. Login
+Operator responsibility, documented loudly in the README: the
+upstream proxy MUST strip these headers from inbound requests
+before forwarding. Every proxy in the table above does this by
+default, but it's the deployment's job to verify.
 
-The MVP login is **username + password against tenant users**.
-We don't currently have password storage on the `users` table
-(tokens are the only credential), so this is a real schema
-addition:
+**Signed-header verification (Cloudflare Access, AWS ALB, Google
+IAP) is deferred to v2** — inherently provider-specific, and
+the trusted-IP-plus-plain-header combo covers the 90% case.
+
+Identity resolution: when a request arrives with a trusted
+`X-Forwarded-User: alice@example.com`, the console looks up
+`alice@example.com` in `internal/users/` and constructs an
+`Identity`. **Users are created on-the-fly** the first time a
+new user is seen — the proxy is the source of truth, the
+local `users` table is a cache. (System-admin role still has
+to be granted explicitly by an existing admin; the first
+proxy-authenticated user is *not* automatically an admin.)
+
+If `groups` are present and a configured group claim matches a
+role (e.g. `pkgmirror-admins`), the role gets applied
+automatically. Otherwise the user logs in as a regular
+member of the tenants they're already in.
+
+### 5.2. Mode B: built-in username/password (laptop dev + tiny deployments)
+
+Useful when there's no proxy in front — single-binary on a
+laptop, a personal homelab, a quick demo. **Not recommended for
+production** unless the deployment is genuinely behind a network
+that does its own AuthN (a VPN, a Tailnet).
+
+- Username + password against the `users` table
+- argon2id hashing with standard parameters
+- Rate-limited login route (sliding window, e.g. 10
+  attempts/minute/IP)
+- Session via gorilla/sessions `CookieStore` (see §5.4)
+
+Schema migration (only needed if mode=password; the migration
+is idempotent and applies regardless, but the columns are
+nullable so token-only deployments never need to populate them):
 
 ```sql
 ALTER TABLE users ADD COLUMN password_hash TEXT;     -- argon2id, nullable
 ALTER TABLE users ADD COLUMN password_set_unix INT;  -- timestamp of last set
 ```
 
-Nullable so existing token-only users aren't forced to pick a
-password. The first console-login attempt for a tokenless user
-gets a "set a password first" prompt.
+First login attempt for a tokenless user (e.g. created via
+`PKGMIRROR_ADMIN_TOKEN` bootstrap) prompts "set a password
+first" rather than rejecting.
 
-OIDC is a **v2** item — see §11.
+OIDC and WebAuthn / passkeys remain **v2** items (§11) for
+both modes.
+
+### 5.3. Implementation shape
+
+`internal/auth/` grows one new impl per mode:
+
+```go
+// Mode A
+type ProxyHeaderAuthenticator struct {
+    UserHeader      string
+    EmailHeader     string
+    GroupsHeader    string
+    TrustedProxies  []net.IPNet
+    Users           *users.Store
+    Tenants         *tenants.Store
+}
+
+func (a *ProxyHeaderAuthenticator) Authenticate(ctx context.Context, r *http.Request) (*Identity, error) {
+    if !a.isTrustedSource(r) {
+        return nil, nil  // anonymous; headers ignored
+    }
+    user := r.Header.Get(a.UserHeader)
+    if user == "" {
+        return nil, nil  // anonymous
+    }
+    u, _ := a.Users.GetOrCreate(ctx, user, r.Header.Get(a.EmailHeader))
+    mem, _ := a.Tenants.Memberships(ctx, u.ID)
+    return &Identity{User: u, Memberships: mem}, nil  // Token field left nil
+}
+
+// Mode B
+type SessionAuthenticator struct {
+    Sessions sessions.Store  // gorilla/sessions CookieStore
+    Users    *users.Store
+    Tenants  *tenants.Store
+}
+
+func (a *SessionAuthenticator) Authenticate(ctx context.Context, r *http.Request) (*Identity, error) {
+    sess, _ := a.Sessions.Get(r, "pkgmirror_session")
+    uid, ok := sess.Values["user_id"].(int64)
+    if !ok { return nil, nil }
+    u, _ := a.Users.GetByID(ctx, uid)
+    mem, _ := a.Tenants.Memberships(ctx, u.ID)
+    return &Identity{User: u, Memberships: mem}, nil
+}
+```
+
+The shared `Identity` type and `RequireRead` / `RequireWrite`
+helpers don't change.
+
+A request arriving at the registry routes (which still use
+`TokenAuthenticator`) with a session cookie but no Bearer/Basic
+header reads as anonymous — by design. The chains don't blur.
+
+### 5.4. Sessions: gorilla/sessions `CookieStore` (no SQLite session table)
+
+The stateless-cookie approach. Session data lives in the cookie
+itself, encrypted + signed via gorilla/securecookie. **No
+server-side session store needed** — zero schema additions for
+sessions, zero DB I/O per request, natural for K8s rolling
+restart with no session affinity.
+
+Wire via gin-contrib/sessions (same library go_gin_starter uses):
+
+```go
+import (
+    "github.com/gin-contrib/sessions"
+    "github.com/gin-contrib/sessions/cookie"
+)
+
+store := cookie.NewStore(
+    []byte(c.Config.SessionAuthKey),  // 64 bytes
+    []byte(c.Config.SessionEncKey),   // 32 bytes
+)
+store.Options(sessions.Options{
+    Path:     "/console",
+    MaxAge:   int(c.Config.SessionTTL.Seconds()),
+    Secure:   c.Config.UsingTLS,
+    HttpOnly: true,
+    SameSite: http.SameSiteLaxMode,
+})
+
+g := r.Group("/console", sessions.Sessions("pkgmirror_session", store))
+```
+
+Trade-offs to accept (both fine for our scale):
+
+- Session data capped at ~4 KB (cookie size limit). We only need
+  `{user_id, expires_at, csrf_seed}` — ample room.
+- Session invalidation by-id is hard; you wait for the cookie to
+  expire or rotate the signing key (logs everyone out). When the
+  operator population grows to hundreds + needs fast remote
+  logout, swap `CookieStore` for `RedisStore` or a SQLite-backed
+  `*sql.DB` store — one-line change, same API.
+
+A `make gen-keys` Makefile target prints fresh 64+32 byte
+random values for the operator to drop into env.
+
+Note on gorilla maintenance: the project was un-archived in 2023
+by a new maintainer team; gorilla/sessions, gorilla/securecookie,
+and gorilla/csrf are all on actively-maintained mainline as of
+2024+. Safe to depend on.
+
+### 5.5. CSRF: gorilla/csrf
+
+The canonical Go CSRF library. Works with any `http.Handler`;
+wraps cleanly into gin via `gin.WrapH` (or a small adapter
+middleware).
+
+Applies to **both** auth modes — the proxy-header mode is not
+immune to CSRF since a state-changing form submitted from a
+malicious page would still carry the user's session/proxy
+cookie.
+
+```go
+import "github.com/gorilla/csrf"
+
+csrfMW := csrf.Protect(
+    []byte(c.Config.CSRFKey),
+    csrf.Secure(c.Config.UsingTLS),
+    csrf.HttpOnly(true),
+    csrf.SameSite(csrf.SameSiteLaxMode),
+    csrf.Path("/console"),
+)
+```
+
+Templates access the token via a `csrfField` template func that
+calls `csrf.TemplateField(r)`:
+
+```html
+<form method="post" action="/console/admin/tenants">
+    {{ csrfField }}
+    <!-- ... -->
+</form>
+```
+
+Missing or stale token returns 403 with a friendly page (CSRF
+failure handler configured via `csrf.ErrorHandler`).
+
+### 5.6. Pairing with single-binary deployment (§6)
+
+The proxy-header auth mode pairs naturally with the
+single-binary recommendation: stick pkgmirror behind
+oauth2-proxy / Authelia / Cloudflare Access / your-corporate-
+proxy-of-choice, set two env vars, done. The auth complexity
+belongs in the proxy ecosystem where it's already solved well;
+the app stays small.
 
 ---
 
@@ -697,67 +890,46 @@ session bits are load-bearing — don't skimp on them.
 
 ## 10. Open questions (need user answers before §9 starts)
 
-Two of the original seven questions have since been answered by
-the user and folded into §4/§7:
+Five of the original seven questions have since been answered
+by the user and folded into §4/§5/§7:
 
 - **Templating decided:** `html/template`, no templ, no HTMX (§7.1)
 - **Styling decided:** Tailwind via standalone CLI + copilot-api
   theme tokens (§7.2)
+- **Login mechanism decided:** dual-mode — `proxy-header`
+  (recommended for production) + `password` (laptop dev),
+  configurable via `PKGMIRROR_CONSOLE_AUTH_MODE`. OIDC remains a
+  v2 item. (§5.1 + §5.2)
+- **CSRF decided:** gorilla/csrf (§5.5)
+- **Session store decided:** gorilla/sessions `CookieStore`
+  (no SQLite session table needed). Stateless-cookie approach;
+  swap for Redis/SQLite-backed store when operator count grows.
+  (§5.4)
 
-Five remain.
+Two remain.
 
-### Q1. Login mechanism: username/password only, or OIDC from day one?
-
-- **Recommendation:** username/password for MVP (with argon2id
-  storage). OIDC as a v2 item — needs a per-tenant or
-  per-deployment IdP config dance that's its own discussion.
-
-### Q2. CSRF: cookie-and-form-field pattern, or origin-header check?
-
-- **Recommendation:** cookie-and-form-field (gorilla/csrf style
-  but home-grown to avoid the dep). Origin-header check is
-  cheaper but less battle-tested.
-
-### Q3. Session store: SQLite-backed (durable across restarts), or in-memory map (lost on restart)?
-
-- **Recommendation:** SQLite-backed by default with an opt-in
-  in-memory mode for single-process dev. Durable sessions match
-  user expectations and don't force re-login on every binary
-  restart.
-
-### Q4. Console + registry on the same listener, or separate ports from day 1?
+### Q1. Console + registry on the same listener, or separate ports from day 1?
 
 - **Recommendation:** same listener with route-group separation.
   Splitting listeners means two `http.Server`s, two TLS configs,
   two metrics paths — overhead for no clear benefit at our
-  current scale. Day-2 split into two binaries covers the
-  "different rate-limit policies" case better than two listeners
-  in one process would.
+  current scale. Day-2 split into two binaries (§6.2) covers
+  the "different rate-limit policies" case better than two
+  listeners in one process would.
 
-### Q5. Routes for end-user-facing pages (per-tenant package browse without admin login), or admin-only?
+### Q2. Routes for end-user-facing pages (per-tenant package browse without admin login), or admin-only?
 
 - **Recommendation:** admin-only for MVP. End-user-facing
   "browse the contents of a tenant" is a separate UI concern
   that can borrow templates later. Limits the scope and the
   threat model for v1.
 
-### Q6. Embedded assets vs filesystem-served assets?
-
-- **Recommendation:** `embed.FS` so the binary is still
-  single-artifact. Override path via env var
-  (`PKGMIRROR_CONSOLE_DEV_DIR`) for live-reload during
-  development. See §4.11.
-
 ### Default to all recommendations?
 
-If the user says "your call on all six", proceed with:
+If the user says "your call on both", proceed with:
 
-- Username/password (argon2id), OIDC later
-- Cookie-and-form-field CSRF
-- SQLite-backed session store
 - Same listener, route-group separation
 - Admin-only console
-- Embedded assets with env-var override
 
 ---
 
@@ -834,34 +1006,50 @@ Items intentionally deferred from the MVP:
 - `PKGMIRROR_CONSOLE_ENABLED=true` (default) wires the
   `/console` and `/static` route groups; `false` strips them
   cleanly with no leftover routes
-- `/console/login` accepts username + password; argon2id
-  hashing; on success sets an HttpOnly session cookie
+- **Auth mode A (`proxy-header`):** a request from a
+  `PKGMIRROR_CONSOLE_TRUSTED_PROXIES`-matching source with the
+  configured user header set resolves to that user's `Identity`
+  and renders the home page; the same request from a non-trusted
+  source treats as anonymous regardless of header presence
+- **Auth mode B (`password`):** `/console/login` accepts
+  username + password; argon2id hashing; on success the
+  gorilla/sessions cookie is set with `HttpOnly` + `SameSite=Lax`;
+  login rate limit fires after 10 attempts/min/IP
 - `/console/dashboard` renders without errors for a freshly-
-  logged-in admin against a fresh `make run`-style instance
+  authenticated admin against a fresh `make run`-style instance
+  in both auth modes
 - Tenant browser, package browser, audit page, rules editor,
   and token management page all read-render-and-edit per their
   scope
-- CSRF token enforced on every state-changing form; missing
-  token returns 403 with a friendly page
+- CSRF token (gorilla/csrf) enforced on every state-changing
+  form in both auth modes; missing/stale token returns 403
+  with a friendly page
 - Session expires after the configured TTL
   (`PKGMIRROR_SESSION_TTL`, default 24h); a request with an
-  expired cookie redirects to login
+  expired cookie redirects to login (mode B) or re-reads from
+  proxy header (mode A)
 - Schema migration adds `password_hash` + `password_set_unix`
-  columns; existing users without a password get a "set password"
-  redirect on first login attempt
+  columns idempotently; mode A deployments never touch them
 - `make build-css` produces `internal/console/static/css/console.css`
   byte-identically on a clean checkout; the committed file
   matches
 - `PKGMIRROR_CONSOLE_DEV_DIR=internal/console` overrides the
   embed and serves edits-without-rebuild for both `.tmpl` and
   static assets
+- `make gen-keys` prints fresh random session-auth + session-enc
+  + CSRF keys for the operator to drop into env
 - Visual match to copilot-api: same color palette, sidebar+content
   app shell, dark mode toggle. Pixel-fidelity not required
 - Stress loop (`go test ./... -count=1` × 10) green
 - README has a "Using the console" section with screenshots,
-  the `PKGMIRROR_CONSOLE_ENABLED` flag, and the
-  `make build-css` / `make watch-css` workflow documented
-- DECISIONS.md entry capturing all six §10 answers + the
-  schema migration + the Tailwind + the page-package convention
+  the `PKGMIRROR_CONSOLE_ENABLED` flag, the
+  `PKGMIRROR_CONSOLE_AUTH_MODE` flag and per-mode setup
+  (including proxy-header examples for oauth2-proxy + Cloudflare
+  Access + AWS ALB), and the `make build-css` /
+  `make watch-css` workflow documented
+- DECISIONS.md entry capturing both §10 answers + the auth
+  tri-mode + the schema migration + the Tailwind + the
+  page-package convention
 - [docs/auth.md](../docs/auth.md) updated to document the
-  Session vs Token middleware chains and where each is mounted
+  three middleware chains (Registry / Admin API / Console) and
+  the two console-side auth modes
