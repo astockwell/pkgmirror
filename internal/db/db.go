@@ -218,6 +218,29 @@ ALTER TABLE package_versions ADD COLUMN license                TEXT;
 ALTER TABLE package_versions ADD COLUMN quarantine_reason      TEXT;
 ALTER TABLE package_versions ADD COLUMN quarantined_by_rule_id INTEGER REFERENCES policy_rules(id) ON DELETE SET NULL;
 `,
+	// v3 -> v4: web-console authentication surface.
+	//
+	// Adds password-mode credential columns to users and an actor_kind
+	// column to audit_log so console-authored audit rows can be
+	// distinguished from PAT-authored ones at query time.
+	//
+	// All three columns are nullable / default-NULL for backwards
+	// compatibility:
+	//   - proxy-header-mode deployments never populate password_hash
+	//   - registry/admin PAT calls don't populate actor_kind (it's the
+	//     console authenticators in PR 2b/2c that stamp it)
+	//   - existing rows in users + audit_log keep their pre-v4 shape
+	//
+	// password_hash is the argon2id-encoded password (see
+	// internal/users/password.go). password_set_unix tracks when it was
+	// last set so the console can prompt re-set after a rotation policy
+	// is in place (v2). Clearing a password sets both columns to NULL
+	// in the same UPDATE.
+	`
+ALTER TABLE users     ADD COLUMN password_hash      TEXT;
+ALTER TABLE users     ADD COLUMN password_set_unix  INTEGER;
+ALTER TABLE audit_log ADD COLUMN actor_kind         TEXT;
+`,
 }
 
 // Open opens (and creates if missing) the SQLite database at path and brings
