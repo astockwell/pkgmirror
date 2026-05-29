@@ -178,7 +178,18 @@ func main() {
 		case "password":
 			consoleAuthn = consolemw.NewSessionAuthenticator(userStore, tenantStore)
 		case "proxy-header":
-			log.Fatalf("console: PKGMIRROR_CONSOLE_AUTH_MODE=proxy-header not yet supported (lands in PR 2c)")
+			consoleAuthn = consolemw.NewProxyHeaderAuthenticator(consolemw.ProxyHeaderOptions{
+				Users:          userStore,
+				Tenants:        tenantStore,
+				UserHeader:     consoleCfg.UserHeader,
+				EmailHeader:    consoleCfg.EmailHeader,
+				GroupsHeader:   consoleCfg.GroupsHeader,
+				TrustedProxies: consoleCfg.TrustedProxies,
+				BootstrapAdmin: consoleCfg.BootstrapAdmin,
+			})
+			if consoleCfg.BootstrapAdmin != "" {
+				log.Printf("console: bootstrap admin watch active for %q (convergent; safe to leave set after promotion)", consoleCfg.BootstrapAdmin)
+			}
 		}
 		c, err := console.New(console.Deps{
 			Config:        consoleCfg,
