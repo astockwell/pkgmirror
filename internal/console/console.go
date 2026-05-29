@@ -25,6 +25,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/console/middleware"
 	"github.com/astockwell/pkgmirror/internal/models"
+	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/tokens"
 	"github.com/astockwell/pkgmirror/internal/users"
@@ -48,6 +49,7 @@ type Deps struct {
 	Models        *models.Store
 	Tokens        *tokens.Store
 	Audit         audit.Logger
+	Rules         *policy.RuleStore
 	Authenticator auth.Authenticator
 	AppVersion    string
 }
@@ -61,6 +63,7 @@ type Console struct {
 	models      *models.Store
 	tokens      *tokens.Store
 	audit       audit.Logger
+	rules       *policy.RuleStore
 	auth        auth.Authenticator
 	templates   *template.Template
 	middleware  *middleware.Middleware
@@ -95,6 +98,7 @@ func New(d Deps) (*Console, error) {
 		models:     d.Models,
 		tokens:     d.Tokens,
 		audit:      d.Audit,
+		rules:      d.Rules,
 		auth:       d.Authenticator,
 		templates:  tmpl,
 		appVersion: d.AppVersion,
@@ -192,6 +196,14 @@ func (c *Console) Register(r *gin.Engine) error {
 	// Audit (system admin only).
 	adminOnly.GET("/audit", c.auditList)
 	adminOnly.GET("/audit.csv", c.auditExportCSV)
+
+	// Rules (system admin only).
+	adminOnly.GET("/rules", c.rulesList)
+	adminOnly.GET("/rules/new", c.ruleNew)
+	adminOnly.GET("/rules/:id", c.ruleEdit)
+	adminOnly.POST("/rules", c.ruleUpsert)
+	adminOnly.POST("/rules/:id/enabled", c.ruleSetEnabled)
+	adminOnly.POST("/rules/:id/delete", c.ruleDelete)
 
 	return nil
 }

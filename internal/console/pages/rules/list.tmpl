@@ -1,0 +1,69 @@
+{{ define "pages/rules/list" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>Policy rules</h1>
+    <p class="muted">
+      Rules drive the supply-chain policy engine. Higher priority (lower number) wins on conflict.
+      <a href="/console/rules/new" class="btn btn-primary btn-sm" style="margin-left:8px">New rule</a>
+    </p>
+  </header>
+
+  {{ if .Body.Rules }}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Kind</th>
+        <th>Action</th>
+        <th>Selector</th>
+        <th>Priority</th>
+        <th>Enabled</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Body.Rules }}
+      <tr>
+        <td><a href="/console/rules/{{ .ID }}">{{ .Name }}</a></td>
+        <td>{{ .Kind }}</td>
+        <td>
+          {{ if eq .Action "allow" }}<span style="color:var(--success)">{{ .Action }}</span>
+          {{ else if eq .Action "warn" }}<span style="color:var(--warning)">{{ .Action }}</span>
+          {{ else if eq .Action "quarantine" }}<span style="color:var(--warning)">{{ .Action }}</span>
+          {{ else if eq .Action "deny" }}<span style="color:var(--danger)">{{ .Action }}</span>
+          {{ else }}{{ .Action }}{{ end }}
+        </td>
+        <td class="muted" style="font-size:0.85rem">
+          {{ if .Format }}fmt:{{ .Format }} {{ end }}
+          {{ if .TenantID }}tenant:#{{ .TenantID }} {{ end }}
+          {{ if .Package }}pkg:{{ .Package }} {{ end }}
+          {{ if .VersionPat }}ver:{{ .VersionPat }} {{ end }}
+          {{ if and (not .Format) (not .TenantID) (not .Package) (not .VersionPat) }}* (all){{ end }}
+        </td>
+        <td>{{ .Priority }}</td>
+        <td>
+          <form method="post" action="/console/rules/{{ .ID }}/enabled" style="display:inline">
+            {{ $.Base.CSRFField }}
+            <input type="hidden" name="enabled" value="{{ if .Enabled }}false{{ else }}true{{ end }}">
+            <button type="submit" class="btn btn-ghost btn-sm">
+              {{ if .Enabled }}<span style="color:var(--success)">on</span>{{ else }}<span class="muted">off</span>{{ end }}
+            </button>
+          </form>
+        </td>
+        <td style="white-space:nowrap">
+          <a href="/console/rules/{{ .ID }}" class="btn btn-ghost btn-sm">Edit</a>
+          <form method="post" action="/console/rules/{{ .ID }}/delete" style="display:inline">
+            {{ $.Base.CSRFField }}
+            <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Delete rule {{ .Name }}?')">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  {{ template "ui/alert" (dict "severity" "info" "title" "No rules configured"
+        "body" "Create a rule to start filtering or quarantining ingests. Rules can scope by format, tenant, package, or version pattern.") }}
+  {{ end }}
+</section>
+{{ end }}

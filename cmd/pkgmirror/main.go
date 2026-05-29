@@ -198,6 +198,7 @@ func main() {
 			Models:        pkgModels,
 			Tokens:        tokenStore,
 			Audit:         auditLogger,
+			Rules:         ruleStore,
 			Authenticator: consoleAuthn,
 			AppVersion:    "dev",
 		})

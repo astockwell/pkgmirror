@@ -1,0 +1,95 @@
+{{ define "pages/rules/edit" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>{{ if .Body.ID }}Edit rule{{ else }}New rule{{ end }}</h1>
+    <p class="muted">
+      Selector fields are AND-combined; empty fields mean "any" for that dimension.
+      The kind-specific config goes in the JSON box at the bottom.
+    </p>
+  </header>
+
+  <form method="post" action="/console/rules" style="max-width:760px">
+    {{ .Base.CSRFField }}
+    <input type="hidden" name="id" value="{{ .Body.ID }}">
+
+    <div class="grid grid-2">
+      <div class="field">
+        <label for="name" class="field-label">Name</label>
+        <input id="name" name="name" type="text" class="field-input" value="{{ .Body.Name }}" required>
+        <p class="field-help">Unique label (also used as the upsert key).</p>
+        {{ with index .Body.Errors "name" }}<p class="field-error">{{ . }}</p>{{ end }}
+      </div>
+      <div class="field">
+        <label for="priority" class="field-label">Priority</label>
+        <input id="priority" name="priority" type="number" min="1" max="10000" class="field-input" value="{{ .Body.Priority }}">
+        <p class="field-help">Lower number = higher precedence (1 = highest).</p>
+        {{ with index .Body.Errors "priority" }}<p class="field-error">{{ . }}</p>{{ end }}
+      </div>
+    </div>
+
+    <div class="grid grid-2">
+      <div class="field">
+        <label for="kind" class="field-label">Kind</label>
+        <select id="kind" name="kind" class="field-select">
+          <option value="cooldown"  {{ if eq .Body.Kind "cooldown"  }}selected{{ end }}>cooldown</option>
+          <option value="license"   {{ if eq .Body.Kind "license"   }}selected{{ end }}>license</option>
+          <option value="blocklist" {{ if eq .Body.Kind "blocklist" }}selected{{ end }}>blocklist</option>
+        </select>
+        {{ with index .Body.Errors "kind" }}<p class="field-error">{{ . }}</p>{{ end }}
+      </div>
+      <div class="field">
+        <label for="action" class="field-label">Action</label>
+        <select id="action" name="action" class="field-select">
+          <option value="warn"       {{ if eq .Body.Action "warn"       }}selected{{ end }}>warn</option>
+          <option value="quarantine" {{ if eq .Body.Action "quarantine" }}selected{{ end }}>quarantine</option>
+          <option value="deny"       {{ if eq .Body.Action "deny"       }}selected{{ end }}>deny</option>
+        </select>
+        {{ with index .Body.Errors "action" }}<p class="field-error">{{ . }}</p>{{ end }}
+      </div>
+    </div>
+
+    <h3 style="font-size:1.05rem;margin-top:24px">Selectors</h3>
+    <div class="grid grid-2">
+      <div class="field">
+        <label for="format" class="field-label">Format</label>
+        <input id="format" name="format" type="text" class="field-input" value="{{ .Body.Format }}" placeholder="e.g. npm, pypi, maven, ...">
+      </div>
+      <div class="field">
+        <label for="tenant_id" class="field-label">Tenant ID</label>
+        <input id="tenant_id" name="tenant_id" type="number" min="1" class="field-input" value="{{ if .Body.TenantID }}{{ .Body.TenantID }}{{ end }}">
+      </div>
+    </div>
+    <div class="grid grid-2">
+      <div class="field">
+        <label for="package" class="field-label">Package (lower-name)</label>
+        <input id="package" name="package" type="text" class="field-input" value="{{ .Body.Package }}" placeholder="exact match; case-insensitive">
+      </div>
+      <div class="field">
+        <label for="version_pattern" class="field-label">Version pattern</label>
+        <input id="version_pattern" name="version_pattern" type="text" class="field-input" value="{{ .Body.VersionPat }}" placeholder="glob: 0.* or 1.2.?">
+        <p class="field-help">filepath.Match syntax. Empty = all versions.</p>
+      </div>
+    </div>
+
+    <h3 style="font-size:1.05rem;margin-top:24px">Kind config</h3>
+    <div class="field">
+      <label for="config_json" class="field-label">config_json</label>
+      <textarea id="config_json" name="config_json" class="field-textarea" rows="6" style="font-family:var(--mono);font-size:0.85rem">{{ .Body.ConfigJSON }}</textarea>
+      <p class="field-help">Kind-specific JSON. See docs/supply-chain.md for shapes (cooldown: {"days":7}, license: {"allow":["MIT"]}, blocklist: {}).</p>
+      {{ with index .Body.Errors "config_json" }}<p class="field-error">{{ . }}</p>{{ end }}
+    </div>
+
+    <div class="field">
+      <label class="field-label">
+        <input type="checkbox" name="enabled" {{ if .Body.Enabled }}checked{{ end }}>
+        Enabled
+      </label>
+    </div>
+
+    <div style="display:flex;gap:8px">
+      <button type="submit" class="btn btn-primary">Save rule</button>
+      <a href="/console/rules" class="btn">Cancel</a>
+    </div>
+  </form>
+</section>
+{{ end }}

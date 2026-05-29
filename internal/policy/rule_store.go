@@ -83,6 +83,42 @@ func (s *RuleStore) ListEnabled(ctx context.Context) ([]Rule, error) {
 	return out, rows.Err()
 }
 
+// ListAll returns every rule, enabled or not, ordered by priority then
+// name. Used by the web console rules page (operators need to see
+// disabled rules to re-enable them).
+func (s *RuleStore) ListAll(ctx context.Context) ([]Rule, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT `+ruleColumns+` FROM policy_rules ORDER BY priority ASC, name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Rule
+	for rows.Next() {
+		r, err := scanRule(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetByID looks up a single rule by ID. Used by the web console
+// rules-detail/edit page.
+func (s *RuleStore) GetByID(ctx context.Context, id int64) (Rule, error) {
+	row := s.DB.QueryRowContext(ctx,
+		`SELECT `+ruleColumns+` FROM policy_rules WHERE id = ? LIMIT 1`, id)
+	r, err := scanRule(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Rule{}, ErrRuleNotExist
+		}
+		return Rule{}, err
+	}
+	return r, nil
+}
+
 // GetByName looks up a single rule by its human label. Rule names should
 // be unique by convention (the YAML loader relies on it).
 func (s *RuleStore) GetByName(ctx context.Context, name string) (Rule, error) {
