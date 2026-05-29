@@ -16,3 +16,6 @@
 *.swp
 .idea/
 .vscode/
+
+# Binaries
+cmd/pkgmirror/pkgmirror
