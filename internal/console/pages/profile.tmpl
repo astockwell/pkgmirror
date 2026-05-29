@@ -1,0 +1,68 @@
+{{ define "pages/profile" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>Profile</h1>
+    <p class="muted">Your account and access.</p>
+  </header>
+
+  <div class="grid grid-2">
+    {{ template "ui/card" (dict "title" "Username" "value" .Body.UserName) }}
+    {{ template "ui/card" (dict "title" "Email" "value" (default "(none)" .Body.Email)) }}
+  </div>
+  <div class="grid grid-2" style="margin-top:12px">
+    {{ template "ui/card" (dict "title" "Auth" "value" .Body.AuthKind "subtitle" "How you signed in this session") }}
+    {{ template "ui/card" (dict "title" "System admin" "value" (default "no" (printf "%v" .Body.IsAdmin))) }}
+  </div>
+</section>
+
+<section class="page-section">
+  <header class="page-header">
+    <h2 style="font-size:1.2rem">Memberships</h2>
+  </header>
+  {{ if .Body.Memberships }}
+  <table class="table">
+    <thead><tr><th>Tenant</th><th>Role</th></tr></thead>
+    <tbody>
+      {{ range .Body.Memberships }}
+      <tr>
+        <td><a href="/console/tenants/{{ .TenantName }}">{{ .TenantName }}</a></td>
+        <td>{{ .RoleName }}</td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  <p class="muted">No tenant memberships yet.</p>
+  {{ end }}
+</section>
+
+{{ if eq .Base.Identity.Kind 1 }}
+<section class="page-section">
+  <header class="page-header">
+    <h2 style="font-size:1.2rem">Change password</h2>
+    {{ if not .Body.PasswordSet }}
+      <p class="muted">You currently have no password set. Use the set-password flow on the login page.</p>
+    {{ end }}
+  </header>
+  {{ if .Body.PasswordSet }}
+  <form method="post" action="/console/profile/password" style="max-width:480px">
+    {{ .Base.CSRFField }}
+    <div class="field">
+      <label for="current_password" class="field-label">Current password</label>
+      <input id="current_password" name="current_password" type="password" autocomplete="current-password" class="field-input" required>
+    </div>
+    <div class="field">
+      <label for="new_password" class="field-label">New password</label>
+      <input id="new_password" name="new_password" type="password" autocomplete="new-password" minlength="12" class="field-input" required>
+      <p class="field-help">12 characters minimum.</p>
+    </div>
+    <div class="field">
+      <label for="confirm_password" class="field-label">Confirm new password</label>
+      <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password" minlength="12" class="field-input" required>
+    </div>
+    <button type="submit" class="btn btn-primary">Change password</button>
+  </form>
+  {{ end }}
+</section>
+{{ end }}
+{{ end }}

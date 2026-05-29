@@ -1,0 +1,92 @@
+{{ define "pages/tokens/list" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>Personal access tokens</h1>
+    <p class="muted">
+      Tokens authenticate <strong>API</strong> calls (registry pushes, admin REST, etc).
+      The web console uses your password-mode session; tokens are not consumed here.
+      <br>
+      A token is shown <em>once</em> at creation time. Save it somewhere safe; the bytes
+      can't be recovered later.
+    </p>
+  </header>
+
+  {{ if .Body.NewPlain }}
+  <div class="alert alert-success" role="alert" style="margin-bottom:16px">
+    <div class="alert-title">New token: {{ .Body.NewName }}</div>
+    <div class="alert-body">
+      <p>Copy this now. You won't see it again.</p>
+      <code style="display:block;padding:8px;background:var(--bg);border-radius:4px;word-break:break-all">{{ .Body.NewPlain }}</code>
+    </div>
+  </div>
+  {{ end }}
+
+  <details style="margin-bottom:16px">
+    <summary class="btn btn-primary" style="cursor:pointer">Mint new token</summary>
+    <form method="post" action="/console/tokens" style="margin-top:12px;max-width:520px">
+      {{ .Base.CSRFField }}
+      <div class="field">
+        <label for="name" class="field-label">Name</label>
+        <input id="name" name="name" type="text" class="field-input" placeholder="e.g. ci-pipeline" required maxlength="80">
+        <p class="field-help">Human label. Helps you find it later.</p>
+      </div>
+      <div class="field">
+        <label class="field-label">Scopes</label>
+        <label style="display:block"><input type="checkbox" name="scope" value="read"> read (pull packages)</label>
+        <label style="display:block"><input type="checkbox" name="scope" value="write"> write (push packages)</label>
+        {{ if and .Base.Identity .Base.Identity.User .Base.Identity.User.IsAdmin }}
+        <label style="display:block"><input type="checkbox" name="scope" value="admin"> admin (system-wide)</label>
+        {{ end }}
+      </div>
+      <div class="field">
+        <label for="tenant_scope" class="field-label">Limit to tenant (optional)</label>
+        <input id="tenant_scope" name="tenant_scope" type="number" min="1" class="field-input" placeholder="leave blank for any tenant you have access to">
+      </div>
+      <div class="field">
+        <label for="expires_in_days" class="field-label">Expires in (days, optional)</label>
+        <input id="expires_in_days" name="expires_in_days" type="number" min="1" class="field-input" placeholder="leave blank for never">
+      </div>
+      <button type="submit" class="btn btn-primary">Mint</button>
+    </form>
+  </details>
+
+  {{ if .Body.Tokens }}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Scopes</th>
+        <th>Tenant</th>
+        <th>Created</th>
+        <th>Last used</th>
+        <th>Expires</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Body.Tokens }}
+      <tr>
+        <td>{{ .Name }}</td>
+        <td class="muted">{{ .Scopes }}</td>
+        <td class="muted">{{ default "any" .TenantScope }}</td>
+        <td class="muted">{{ humanTime .CreatedUnix }}</td>
+        <td class="muted">{{ humanTime .LastUsedUnix }}</td>
+        <td class="muted">
+          {{ if .ExpiresUnix }}{{ timefmt .ExpiresUnix "2006-01-02" }}{{ else }}never{{ end }}
+        </td>
+        <td>
+          <form method="post" action="/console/tokens/{{ .ID }}/delete" style="display:inline">
+            {{ $.Base.CSRFField }}
+            <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Revoke token {{ .Name }}? Any client using it will start getting 401.')">Revoke</button>
+          </form>
+        </td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  {{ template "ui/alert" (dict "severity" "info" "title" "No tokens"
+        "body" "You have no personal access tokens. Mint one above to authenticate API clients.") }}
+  {{ end }}
+</section>
+{{ end }}

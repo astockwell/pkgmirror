@@ -184,6 +184,83 @@ func (s *Store) CountByUser(ctx context.Context, userID int64) (int, error) {
 	return n, err
 }
 
+// ListByUser returns every token owned by a user, ordered newest first.
+// Returned tokens have the metadata fields populated but NOT the
+// plaintext (which is never stored). Used by the web console tokens
+// management page.
+func (s *Store) ListByUser(ctx context.Context, userID int64) ([]*Token, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT id, user_id, name, hash, scopes, tenant_scope,
+		        created_unix, last_used_unix, expires_unix
+		   FROM tokens
+		  WHERE user_id = ?
+		  ORDER BY created_unix DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Token
+	for rows.Next() {
+		t := &Token{}
+		var scopesCSV string
+		if err := rows.Scan(
+			&t.ID, &t.UserID, &t.Name, &t.Hash, &scopesCSV,
+			&t.TenantScope, &t.CreatedUnix, &t.LastUsedUnix, &t.ExpiresUnix,
+		); err != nil {
+			return nil, err
+		}
+		if scopesCSV != "" {
+			for _, s := range strings.Split(scopesCSV, ",") {
+				t.Scopes = append(t.Scopes, Scope(strings.TrimSpace(s)))
+			}
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// Revoke deletes a token by ID. The caller is responsible for verifying
+// the token belongs to (or is manageable by) the requesting user; the
+// store layer doesn't do that check.
+func (s *Store) Revoke(ctx context.Context, tokenID int64) error {
+	res, err := s.DB.ExecContext(ctx,
+		`DELETE FROM tokens WHERE id = ?`, tokenID)
+	if err != nil {
+		return fmt.Errorf("delete token: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotExist
+	}
+	return nil
+}
+
+// GetByID looks up a token by its row ID. Used by the web console
+// tokens management page to verify ownership before revoking.
+func (s *Store) GetByID(ctx context.Context, id int64) (*Token, error) {
+	row := s.DB.QueryRowContext(ctx,
+		`SELECT id, user_id, name, hash, scopes, tenant_scope,
+		        created_unix, last_used_unix, expires_unix
+		   FROM tokens WHERE id = ?`, id)
+	t := &Token{}
+	var scopesCSV string
+	if err := row.Scan(
+		&t.ID, &t.UserID, &t.Name, &t.Hash, &scopesCSV,
+		&t.TenantScope, &t.CreatedUnix, &t.LastUsedUnix, &t.ExpiresUnix,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotExist
+		}
+		return nil, err
+	}
+	if scopesCSV != "" {
+		for _, s := range strings.Split(scopesCSV, ",") {
+			t.Scopes = append(t.Scopes, Scope(strings.TrimSpace(s)))
+		}
+	}
+	return t, nil
+}
+
 // HasScope reports whether the token carries the given scope.
 func (t *Token) HasScope(s Scope) bool {
 	for _, x := range t.Scopes {

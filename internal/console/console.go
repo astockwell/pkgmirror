@@ -205,6 +205,13 @@ func (c *Console) Register(r *gin.Engine) error {
 	adminOnly.POST("/rules/:id/enabled", c.ruleSetEnabled)
 	adminOnly.POST("/rules/:id/delete", c.ruleDelete)
 
+	// Tokens + profile (any signed-in user; ownership checks in handlers).
+	authed.GET("/profile", c.profilePage)
+	authed.POST("/profile/password", c.profileChangePassword)
+	authed.GET("/tokens", c.tokensList)
+	authed.POST("/tokens", c.tokenMint)
+	authed.POST("/tokens/:id/delete", c.tokenRevoke)
+
 	return nil
 }
 
