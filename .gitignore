@@ -4,6 +4,7 @@
 /pkgmirror
 /bin/
 /dist/
+/screenshots/
 
 # Runtime data
 /data/
