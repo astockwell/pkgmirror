@@ -42,6 +42,11 @@ type authFixture struct {
 	Console *console.Console
 	Server  *httptest.Server
 	Client  *http.Client
+
+	// testRoutesRegistered is the idempotency guard for registerTestRoutes
+	// (see middleware_chain_helpers_test.go). gin panics on duplicate
+	// route registration; this flag makes a re-call a no-op.
+	testRoutesRegistered bool
 }
 
 func newAuthFixture(t *testing.T) *authFixture {
