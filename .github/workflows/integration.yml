@@ -1,0 +1,139 @@
+name: Integration (real network)
+
+# Runs the internet-connected integration suite against real public
+# registries (pypi.org today; npm/rubygems/etc. as their adapters
+# ship in PRs L+).
+#
+# WHEN: weekly cron + on-demand via workflow_dispatch. Never on push
+# or pull_request - this suite would (a) hit upstreams from every PR
+# and (b) gate merges on conditions outside the contributor's control.
+#
+# ETIQUETTE: see tests/integration/README.md. Short version:
+#   - tiny canary set of stable packages
+#   - distinctive User-Agent so registry operators can find us
+#   - skip (not fail) when upstream is unreachable
+#
+# FAILURE: when the suite breaks, the workflow auto-files a tracking
+# issue (issues: write permission) instead of running a perma-red
+# scheduled badge nobody looks at.
+
+on:
+  schedule:
+    # Sundays 06:00 UTC. Outside US/EU business hours, well-spaced
+    # from typical Monday morning deploy windows.
+    - cron: "0 6 * * 0"
+  workflow_dispatch:
+    inputs:
+      format:
+        description: "Format to test (pypi | all)"
+        required: false
+        default: "all"
+        type: choice
+        options: [all, pypi]
+
+permissions:
+  contents: read
+  issues: write # for the auto-issue on failure step
+
+concurrency:
+  # Don't pile up if a slow run overlaps the next cron tick.
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pypi:
+    name: PyPI pull-through
+    if: ${{ github.event_name == 'schedule' || inputs.format == 'all' || inputs.format == 'pypi' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Pre-pull pip client image
+        # The pkgmirror image itself is built from the repo Dockerfile
+        # by testcontainers; only the client image needs pulling here.
+        run: docker pull python:3.12-slim
+
+      - name: Run PyPI integration suite
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "false"
+        run: |
+          go test -tags=integration -timeout=15m -v ./tests/integration/pypi/...
+
+      - name: Dump docker state on failure
+        if: failure()
+        run: |
+          docker ps -a
+          docker network ls
+          docker images
+
+  # ----- failure notification -----
+  notify:
+    name: Open tracking issue on failure
+    needs: [pypi]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: File issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Integration suite failure on ${process.env.GITHUB_WORKFLOW} (${new Date().toISOString().slice(0,10)})`;
+            const body = [
+              `The scheduled integration suite failed.`,
+              ``,
+              `**Run**: ${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+              `**Trigger**: ${process.env.GITHUB_EVENT_NAME}`,
+              `**Commit**: ${process.env.GITHUB_SHA}`,
+              ``,
+              `### Triage`,
+              ``,
+              `1. Open the run link above and check whether tests were SKIPPED with "upstream unreachable" - if so, this is an upstream availability issue and the issue can be closed.`,
+              `2. If tests genuinely FAILED, the most likely causes are:`,
+              `   - Upstream schema drift (PyPI changed PEP 691 output, etc.)`,
+              `   - Upstream blocked our User-Agent or IP`,
+              `   - Our adapter regressed`,
+              `3. Reproduce locally:`,
+              `   \`\`\`sh`,
+              `   go test -tags=integration -timeout=15m -v ./tests/integration/pypi/...`,
+              `   \`\`\``,
+              ``,
+              `Search for an existing open issue before creating a duplicate.`,
+            ].join('\n');
+
+            // Dedupe: if an open auto-filed issue exists, comment on it.
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'integration-failure,automated',
+              per_page: 5,
+            });
+            if (existing.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing[0].number,
+                body: `New failure - run: ${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+              });
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['integration-failure', 'automated'],
+            });
