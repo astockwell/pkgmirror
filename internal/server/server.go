@@ -91,7 +91,7 @@ func New(d Deps) (*gin.Engine, error) {
 	// each handler before applying RequireRead / RequireWrite.
 	apiBase := r.Group("/api/packages/:tenant", tokenAuth)
 	goproxy.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/go"))
-	pypi.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/pypi"))
+	pypi.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).WithUpstream(d.Upstream).Register(apiBase.Group("/pypi"))
 	npm.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/npm"))
 	rubygems.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/rubygems"))
 	generic.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/generic"))

@@ -30,6 +30,7 @@ import (
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
 	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
+	"github.com/astockwell/pkgmirror/internal/upstream"
 
 	"github.com/gin-gonic/gin"
 )
@@ -48,18 +49,29 @@ const (
 
 // Handler is the PyPI HTTP handler.
 type Handler struct {
-	Service *pkgsvc.Service
-	Models  *models.Store
-	Tenants *tenants.Store
-	Engine  policy.Engine
+	Service  *pkgsvc.Service
+	Models   *models.Store
+	Tenants  *tenants.Store
+	Engine   policy.Engine
+	Upstream upstream.Fetcher // optional; nil disables pull-through
 }
 
 // NewHandler constructs a Handler. If eng is nil, the no-op engine is used.
+// Upstream is set separately so existing call sites (older tests) keep
+// compiling; use WithUpstream to set it, or just construct the struct
+// directly.
 func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store, eng policy.Engine) *Handler {
 	if eng == nil {
 		eng = policy.NoopEngine{}
 	}
 	return &Handler{Service: svc, Models: m, Tenants: ts, Engine: eng}
+}
+
+// WithUpstream returns h with the pull-through fetcher attached. Use
+// at construction time. Nil-safe: passing nil leaves pull-through off.
+func (h *Handler) WithUpstream(f upstream.Fetcher) *Handler {
+	h.Upstream = f
+	return h
 }
 
 // Register attaches PyPI routes to g (already scoped to
@@ -283,6 +295,17 @@ func (h *Handler) packageIndex(c *gin.Context) {
 	pkg, err := h.Models.GetPackageByLookup(c.Request.Context(), tenant.ID, models.TypePyPI, name)
 	if err != nil {
 		if errors.Is(err, models.ErrPackageNotExist) {
+			// Pull-through: package unknown locally. Try upstream.
+			if h.passthroughEnabled(c, tenant) {
+				up, ferr := h.fetchUpstreamSimple(c, tenant, name)
+				if ferr == nil {
+					h.servePulledThroughIndex(c, up)
+					return
+				}
+				code, msg := mapUpstreamErr(ferr)
+				c.String(code, "%s", msg)
+				return
+			}
 			c.String(http.StatusNotFound, "no such package")
 			return
 		}
@@ -374,11 +397,34 @@ func (h *Handler) download(c *gin.Context) {
 
 	pkg, err := h.Models.GetPackageByLookup(c.Request.Context(), tenant.ID, models.TypePyPI, name)
 	if err != nil {
+		// Pull-through on totally-unknown package.
+		if h.passthroughEnabled(c, tenant) {
+			ok, perr := h.pullThroughDownload(c, tenant, name, version, filename)
+			if ok {
+				return
+			}
+			if perr != nil {
+				code, msg := mapUpstreamErr(perr)
+				c.String(code, "%s", msg)
+				return
+			}
+		}
 		c.String(http.StatusNotFound, "not found")
 		return
 	}
 	ver, err := h.Models.GetVersion(c.Request.Context(), pkg.ID, version)
 	if err != nil {
+		if h.passthroughEnabled(c, tenant) {
+			ok, perr := h.pullThroughDownload(c, tenant, name, version, filename)
+			if ok {
+				return
+			}
+			if perr != nil {
+				code, msg := mapUpstreamErr(perr)
+				c.String(code, "%s", msg)
+				return
+			}
+		}
 		c.String(http.StatusNotFound, "not found")
 		return
 	}
@@ -395,6 +441,17 @@ func (h *Handler) download(c *gin.Context) {
 		}
 	}
 	if match == nil {
+		if h.passthroughEnabled(c, tenant) {
+			ok, perr := h.pullThroughDownload(c, tenant, name, version, filename)
+			if ok {
+				return
+			}
+			if perr != nil {
+				code, msg := mapUpstreamErr(perr)
+				c.String(code, "%s", msg)
+				return
+			}
+		}
 		c.String(http.StatusNotFound, "no such file")
 		return
 	}
