@@ -21,6 +21,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/tokens"
+	"github.com/astockwell/pkgmirror/internal/upstreamstore"
 	"github.com/astockwell/pkgmirror/internal/users"
 
 	"github.com/gin-gonic/gin"
@@ -80,6 +81,7 @@ func newAuthFixture(t *testing.T) *authFixture {
 		Rules:         ruleStore,
 		Authenticator: authn,
 		AppVersion:    "test",
+		Upstreams:     upstreamstore.New(db),
 	})
 	if err != nil {
 		t.Fatalf("console.New: %v", err)

@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/astockwell/pkgmirror/internal/upstream"
 )
@@ -39,3 +40,60 @@ func (s *SQL) LookupTenantUpstream(ctx context.Context, tenantID int64, format s
 	}
 	return &pc, nil
 }
+
+// ListByTenant returns every persisted row for tenantID. The console
+// admin page uses this to render the "current overrides" table; a
+// format absent from the result means it falls through to compiled-in
+// defaults.
+func (s *SQL) ListByTenant(ctx context.Context, tenantID int64) (map[string]*upstream.PersistedConfig, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT format, mode, upstream_url, metadata_ttl_sec, auth_kind, auth_credential, updated_unix
+		  FROM tenant_upstreams
+		 WHERE tenant_id = ?`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]*upstream.PersistedConfig)
+	for rows.Next() {
+		var format string
+		var pc upstream.PersistedConfig
+		if err := rows.Scan(&format, &pc.Mode, &pc.UpstreamURL, &pc.MetadataTTLSec, &pc.AuthKind, &pc.AuthCredential, &pc.UpdatedUnix); err != nil {
+			return nil, err
+		}
+		out[format] = &pc
+	}
+	return out, rows.Err()
+}
+
+// Set upserts the (tenantID, format) row. Use Delete to remove an
+// override and fall back to compiled-in defaults.
+//
+// upstreamURL/metadataTTLSec may be zero values to keep them NULL/0.
+// Caller is responsible for validation; this just persists.
+func (s *SQL) Set(ctx context.Context, tenantID int64, format, mode, upstreamURL string, metadataTTLSec int64) error {
+	var urlField sql.NullString
+	if upstreamURL != "" {
+		urlField = sql.NullString{Valid: true, String: upstreamURL}
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO tenant_upstreams (tenant_id, format, mode, upstream_url, metadata_ttl_sec, updated_unix)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(tenant_id, format) DO UPDATE SET
+		    mode = excluded.mode,
+		    upstream_url = excluded.upstream_url,
+		    metadata_ttl_sec = excluded.metadata_ttl_sec,
+		    updated_unix = excluded.updated_unix`,
+		tenantID, format, mode, urlField, metadataTTLSec, time.Now().Unix())
+	return err
+}
+
+// Delete removes the (tenantID, format) row so the resolver falls back
+// to compiled-in defaults. No-op when no row exists.
+func (s *SQL) Delete(ctx context.Context, tenantID int64, format string) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM tenant_upstreams WHERE tenant_id = ? AND format = ?`,
+		tenantID, format)
+	return err
+}
+

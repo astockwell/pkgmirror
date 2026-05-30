@@ -19,6 +19,9 @@
     </select>
     <button type="submit" class="btn btn-sm">Update</button>
   </form>
+  <p>
+    <a href="/console/tenants/{{ .Body.Tenant.Name }}/upstreams" class="btn btn-ghost btn-sm">Configure upstream pull-through &rarr;</a>
+  </p>
   {{ end }}
 </section>
 

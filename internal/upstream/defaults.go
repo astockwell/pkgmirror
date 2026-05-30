@@ -111,6 +111,17 @@ func DefaultHosts() []string {
 	return out
 }
 
+// AllDefaults returns a snapshot of the compiled-in per-format defaults
+// map. Console UI uses this to render the per-format admin view. Format
+// names are sorted lexicographically so the rendered list is stable.
+func AllDefaults() map[string]DefaultUpstream {
+	out := make(map[string]DefaultUpstream, len(defaultUpstreams))
+	for k, v := range defaultUpstreams {
+		out[k] = v
+	}
+	return out
+}
+
 // Allowlist is the runtime hostname-allow gate. Compiled-in defaults
 // plus PKGMIRROR_UPSTREAM_ALLOWED_HOSTS at construction time. Operators
 // CANNOT extend this through any user-facing UI.

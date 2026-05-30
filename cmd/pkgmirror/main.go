@@ -143,7 +143,8 @@ func main() {
 	// nil-safe: per-format handlers (PR F+) treat a nil Upstream as
 	// "pull-through disabled" and behave exactly as they did before.
 	upstreamCfg := upstream.LoadConfigFromEnv()
-	upstreamFetcher := upstream.New(upstreamCfg, upstreamstore.New(dbConn))
+	upstreamStore := upstreamstore.New(dbConn)
+	upstreamFetcher := upstream.New(upstreamCfg, upstreamStore)
 	log.Printf("upstream: default_mode=%s allowlist_extra=%v allow_private_ips=%v allow_plaintext=%v fetch_timeout=%s max_bytes=%d rpm_per_tenant=%d metadata_cache_max_bytes=%d",
 		upstreamCfg.DefaultMode, upstreamCfg.AllowedHostsExtra, upstreamCfg.AllowPrivateIPs, upstreamCfg.AllowPlaintext,
 		upstreamCfg.FetchTimeout, upstreamCfg.MaxBytesPerFetch, upstreamCfg.FetchRPMPerTenant, upstreamCfg.MetadataCacheMaxBytes)
@@ -216,6 +217,7 @@ func main() {
 			Rules:         ruleStore,
 			Authenticator: consoleAuthn,
 			AppVersion:    "dev",
+			Upstreams:     upstreamStore,
 		})
 		if err != nil {
 			log.Fatalf("console: %v", err)

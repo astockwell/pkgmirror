@@ -28,6 +28,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/tokens"
+	"github.com/astockwell/pkgmirror/internal/upstream"
 	"github.com/astockwell/pkgmirror/internal/users"
 
 	"github.com/gin-contrib/sessions"
@@ -52,6 +53,19 @@ type Deps struct {
 	Rules         *policy.RuleStore
 	Authenticator auth.Authenticator
 	AppVersion    string
+	// Upstreams is the per-(tenant, format) pull-through config store.
+	// Optional; nil hides the /console/tenants/:name/upstreams admin
+	// page so test suites and ops who built without pull-through don't
+	// see broken links.
+	Upstreams UpstreamConfigStore
+}
+
+// UpstreamConfigStore is the surface the console needs to read+write
+// per-tenant pull-through config. Implemented by internal/upstreamstore.
+type UpstreamConfigStore interface {
+	ListByTenant(ctx context.Context, tenantID int64) (map[string]*upstream.PersistedConfig, error)
+	Set(ctx context.Context, tenantID int64, format, mode, upstreamURL string, metadataTTLSec int64) error
+	Delete(ctx context.Context, tenantID int64, format string) error
 }
 
 // Console is the web-console DSO. One per process.
@@ -64,6 +78,7 @@ type Console struct {
 	tokens      *tokens.Store
 	audit       audit.Logger
 	rules       *policy.RuleStore
+	upstreams   UpstreamConfigStore
 	auth        auth.Authenticator
 	templates   *template.Template
 	middleware  *middleware.Middleware
@@ -99,6 +114,7 @@ func New(d Deps) (*Console, error) {
 		tokens:     d.Tokens,
 		audit:      d.Audit,
 		rules:      d.Rules,
+		upstreams:  d.Upstreams,
 		auth:       d.Authenticator,
 		templates:  tmpl,
 		appVersion: d.AppVersion,
@@ -187,6 +203,15 @@ func (c *Console) Register(r *gin.Engine) error {
 	adminOnly.POST("/tenants/:name/visibility", c.tenantSetVisibility)
 	adminOnly.POST("/tenants/:name/members", c.tenantMemberAdd)
 	adminOnly.POST("/tenants/:name/members/:user_id/delete", c.tenantMemberRemove)
+
+	// Upstream pull-through (system admin only; the host allowlist is
+	// NOT editable here on purpose - see plans/upstream-pull-through.md
+	// S2 and S5). Only mounted when an UpstreamConfigStore was supplied.
+	if c.upstreams != nil {
+		adminOnly.GET("/tenants/:name/upstreams", c.tenantUpstreams)
+		adminOnly.POST("/tenants/:name/upstreams/:format", c.tenantUpstreamUpsert)
+		adminOnly.POST("/tenants/:name/upstreams/:format/delete", c.tenantUpstreamReset)
+	}
 
 	// Quarantine (system admin only - cross-tenant view + actions).
 	adminOnly.GET("/quarantine", c.quarantineList)

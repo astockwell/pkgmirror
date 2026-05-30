@@ -1,0 +1,89 @@
+{{ define "pages/tenants/upstreams" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>Upstream pull-through &middot; {{ .Body.TenantName }}</h1>
+    <p class="muted">
+      Configure JIT pull-through caching from canonical public registries (or operator-managed mirrors) on a per-format basis.
+      Hostname allowlist is set at server boot via <code>PKGMIRROR_UPSTREAM_ALLOWED_HOSTS</code> and is <strong>not</strong> editable from this page.
+    </p>
+    <p>
+      <a href="/console/tenants/{{ .Body.TenantName }}" class="btn btn-ghost btn-sm">&larr; Back to tenant</a>
+    </p>
+  </header>
+
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Format</th>
+        <th>Mode</th>
+        <th>Upstream URL</th>
+        <th>Metadata TTL</th>
+        <th>Source</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Body.Rows }}
+      <tr {{ if eq $.Body.Edited .Format }}style="background:rgba(255,200,0,0.08)"{{ end }}>
+        <td>
+          <strong>{{ .Format }}</strong>
+          {{ if not .AdapterShipped }}<br><span class="muted" style="font-size:0.85em">adapter not yet shipped</span>{{ end }}
+        </td>
+        <td colspan="4">
+          <form method="post" action="/console/tenants/{{ $.Body.TenantName }}/upstreams/{{ .Format }}" style="display:grid;gap:8px;grid-template-columns:140px 1fr 100px auto;align-items:center">
+            {{ $.Base.CSRFField }}
+            <select name="mode" class="field-select" {{ if not .AdapterShipped }}disabled{{ end }}>
+              <option value="off"             {{ if eq .Mode "off" }}selected{{ end }}>off</option>
+              <option value="cache_and_serve" {{ if eq .Mode "cache_and_serve" }}selected{{ end }}>cache_and_serve</option>
+              <option value="cache_only"      {{ if eq .Mode "cache_only" }}selected{{ end }}>cache_only</option>
+            </select>
+            <input name="upstream_url" type="url" class="field-input"
+                   value="{{ .UpstreamURL }}"
+                   placeholder="{{ .DefaultURL }} (leave blank for default)"
+                   {{ if not .AdapterShipped }}disabled{{ end }}>
+            <input name="metadata_ttl_sec" type="number" min="0" max="86400" class="field-input"
+                   value="{{ if .MetadataTTLSec }}{{ .MetadataTTLSec }}{{ end }}"
+                   placeholder="300"
+                   {{ if not .AdapterShipped }}disabled{{ end }}>
+            <button type="submit" class="btn btn-primary btn-sm" {{ if not .AdapterShipped }}disabled{{ end }}>Save</button>
+          </form>
+          {{ with index $.Body.Errors .Format }}
+            <p class="muted" style="color:var(--danger);margin-top:6px">{{ . }}</p>
+          {{ end }}
+          <p class="muted" style="font-size:0.85em;margin-top:6px">
+            Allowlisted hosts: {{ range $i, $h := .DefaultHosts }}{{ if $i }}, {{ end }}<code>{{ $h }}</code>{{ end }}
+          </p>
+        </td>
+        <td>
+          {{ if .HasOverride }}<span class="user-badge">custom</span>{{ else }}<span class="muted">default</span>{{ end }}
+        </td>
+        <td>
+          {{ if .HasOverride }}
+          <form method="post" action="/console/tenants/{{ $.Body.TenantName }}/upstreams/{{ .Format }}/delete" style="display:inline">
+            {{ $.Base.CSRFField }}
+            <button type="submit" class="btn btn-ghost btn-sm"
+                    onclick="return confirm('Reset {{ .Format }} to compiled-in default for {{ $.Body.TenantName }}?')">Reset</button>
+          </form>
+          {{ end }}
+        </td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+
+  <section style="margin-top:24px">
+    <h3 style="font-size:1.05rem">Modes</h3>
+    <ul>
+      <li><code>off</code> &mdash; pull-through disabled. Local misses 404 as if pull-through did not exist.</li>
+      <li><code>cache_and_serve</code> &mdash; on a miss, fetch from upstream, persist, and serve. The default.</li>
+      <li><code>cache_only</code> &mdash; on a miss, fetch and persist but hold in quarantine pending operator promotion.</li>
+    </ul>
+    <h3 style="font-size:1.05rem">Custom upstream URL</h3>
+    <p>
+      Leave blank to use the compiled-in canonical default. To point at an internal mirror, provide a fully-qualified URL and add the host to
+      <code>PKGMIRROR_UPSTREAM_ALLOWED_HOSTS</code> at server launch (and restart pkgmirror). The fetcher rechecks the allowlist on every
+      request, so saving a non-allowlisted host here will fail closed at fetch time with no compromise to safety.
+    </p>
+  </section>
+</section>
+{{ end }}
