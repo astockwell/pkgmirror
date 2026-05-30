@@ -28,6 +28,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/ui"
+	"github.com/astockwell/pkgmirror/internal/upstream"
 
 	"github.com/gin-gonic/gin"
 )
@@ -46,6 +47,11 @@ type Deps struct {
 	Rules     *policy.RuleStore
 	Audit     audit.Logger
 	Templates fs.FS
+	// Upstream is the per-(tenant,format) pull-through fetcher. Per-format
+	// handlers that support pull-through (PRs F-P) read this from the
+	// gin context they're handed; nil means pull-through is disabled
+	// process-wide (tests, ops that explicitly opted out).
+	Upstream upstream.Fetcher
 }
 
 // New constructs a configured *gin.Engine.

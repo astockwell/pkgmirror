@@ -30,6 +30,8 @@ import (
 	"github.com/astockwell/pkgmirror/internal/storage"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/tokens"
+	"github.com/astockwell/pkgmirror/internal/upstream"
+	"github.com/astockwell/pkgmirror/internal/upstreamstore"
 	"github.com/astockwell/pkgmirror/internal/users"
 
 	"github.com/gin-gonic/gin"
@@ -134,6 +136,18 @@ func main() {
 
 	engine := audit.WrapEngine(core, auditLogger, tenantStore)
 
+	// JIT upstream pull-through fetcher. Default ON per
+	// plans/upstream-pull-through.md S11; operators opt out per-tenant
+	// via the tenant_upstreams table (web console UI lands in PR E) or
+	// globally with PKGMIRROR_UPSTREAM_DEFAULT_MODE=off. The fetcher is
+	// nil-safe: per-format handlers (PR F+) treat a nil Upstream as
+	// "pull-through disabled" and behave exactly as they did before.
+	upstreamCfg := upstream.LoadConfigFromEnv()
+	upstreamFetcher := upstream.New(upstreamCfg, upstreamstore.New(dbConn))
+	log.Printf("upstream: default_mode=%s allowlist_extra=%v allow_private_ips=%v allow_plaintext=%v fetch_timeout=%s max_bytes=%d rpm_per_tenant=%d metadata_cache_max_bytes=%d",
+		upstreamCfg.DefaultMode, upstreamCfg.AllowedHostsExtra, upstreamCfg.AllowPrivateIPs, upstreamCfg.AllowPlaintext,
+		upstreamCfg.FetchTimeout, upstreamCfg.MaxBytesPerFetch, upstreamCfg.FetchRPMPerTenant, upstreamCfg.MetadataCacheMaxBytes)
+
 	r, err := server.New(server.Deps{
 		Service:       svc,
 		Models:        pkgModels,
@@ -143,6 +157,7 @@ func main() {
 		Rules:         ruleStore,
 		Audit:         auditLogger,
 		Templates:     assets.Templates(),
+		Upstream:      upstreamFetcher,
 	})
 	if err != nil {
 		log.Fatalf("build server: %v", err)
