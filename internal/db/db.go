@@ -241,6 +241,47 @@ ALTER TABLE users     ADD COLUMN password_hash      TEXT;
 ALTER TABLE users     ADD COLUMN password_set_unix  INTEGER;
 ALTER TABLE audit_log ADD COLUMN actor_kind         TEXT;
 `,
+	// v4 -> v5: upstream pull-through caching.
+	//
+	// See plans/upstream-pull-through.md.
+	//
+	// Adds two pieces:
+	//
+	// 1. tenant_upstreams: per (tenant, format) configuration for the
+	//    pull-through fetcher. NULL upstream_url means "use the
+	//    compiled-in canonical default for this format" (defined in
+	//    internal/upstream/defaults.go). mode is one of:
+	//       'off'              - never reach upstream
+	//       'cache_and_serve'  - default; fetch on miss, persist, serve
+	//       'cache_only'       - fetch on miss, persist as quarantined,
+	//                            require operator promotion before serving
+	//    auth_kind/auth_credential are reserved for v1 but only consumed
+	//    by PR Q (private upstreams). auth_credential is encrypted via
+	//    the existing session enc key when stored.
+	//
+	// 2. package_versions.upstream_published_unix: when the format's
+	//    upstream metadata carries a publish time (PyPI's
+	//    upload_time_iso_8601, npm's `time` map, Go's @v/<ver>.info Time,
+	//    etc.), pull-through ingest captures it here. The cooldown
+	//    evaluator's new time_source: upstream_publish knob reads this
+	//    column. NULL means "no upstream publish time known" (locally-
+	//    uploaded packages, or formats that don't carry it).
+	`
+CREATE TABLE IF NOT EXISTS tenant_upstreams (
+    tenant_id        INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    format           TEXT    NOT NULL,
+    mode             TEXT    NOT NULL DEFAULT 'cache_and_serve',
+    upstream_url     TEXT,
+    metadata_ttl_sec INTEGER NOT NULL DEFAULT 300,
+    auth_kind        TEXT,
+    auth_credential  TEXT,
+    updated_unix     INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, format)
+);
+
+ALTER TABLE package_versions
+    ADD COLUMN upstream_published_unix INTEGER;
+`,
 }
 
 // Open opens (and creates if missing) the SQLite database at path and brings
