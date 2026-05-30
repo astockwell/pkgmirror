@@ -1,4 +1,4 @@
-//go:build blackbox
+//go:build blackbox || integration
 
 package harness
 

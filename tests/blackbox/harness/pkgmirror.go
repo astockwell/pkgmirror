@@ -1,4 +1,4 @@
-//go:build blackbox
+//go:build blackbox || integration
 
 package harness
 
@@ -52,10 +52,40 @@ type Stack struct {
 	Container testcontainers.Container
 }
 
-// Start builds the pkgmirror image (cached by docker), creates a fresh
-// docker network, launches the container, and waits for /-/healthz.
-// All resources are torn down via t.Cleanup.
+// Options are knobs passed to StartWithOptions. The zero value matches
+// the original Start() semantics: pull-through OFF (so blackbox tests
+// are insulated from upstream behavior changes), public default tenant.
+//
+// Integration tests (tests/integration/...) populate these to opt INTO
+// pull-through against real public registries.
+type Options struct {
+	// ExtraEnv is merged into the pkgmirror container's env after the
+	// defaults; keys here win on collision so callers can override
+	// PKGMIRROR_UPSTREAM_DEFAULT_MODE, the User-Agent, etc.
+	ExtraEnv map[string]string
+
+	// AllowEgress, when true, gives the pkgmirror container access to
+	// the real internet (the default network in Docker already permits
+	// egress, so this is a no-op today; reserved for the future where
+	// we may sandbox blackbox via --network=none and only re-enable
+	// for integration).
+	AllowEgress bool
+}
+
+// Start launches a default-configured pkgmirror stack with pull-through
+// DISABLED. Equivalent to StartWithOptions(ctx, t, Options{}).
+//
+// Use this from blackbox tests so the suite remains independent of
+// any changes to upstream pull-through behavior.
 func Start(ctx context.Context, t *testing.T) *Stack {
+	return StartWithOptions(ctx, t, Options{})
+}
+
+// StartWithOptions builds the pkgmirror image (cached by docker), creates
+// a fresh docker network, launches the container with the requested
+// option overlay, and waits for /-/healthz. All resources are torn down
+// via t.Cleanup.
+func StartWithOptions(ctx context.Context, t *testing.T, opts Options) *Stack {
 	t.Helper()
 
 	net, err := tcnet.New(ctx)
@@ -70,6 +100,24 @@ func Start(ctx context.Context, t *testing.T) *Stack {
 		_ = net.Remove(shCtx)
 	})
 
+	env := map[string]string{
+		"PKGMIRROR_ADMIN_TOKEN": bootstrapAdminToken,
+		// Public default tenant so the go toolchain can fetch over
+		// plain HTTP without needing credentials (Go refuses to send
+		// auth headers over HTTP regardless of GOAUTH/netrc/URL).
+		// Auth-gate behavior on private tenants is exercised by the
+		// in-process tests in internal/packages/goproxy.
+		"PKGMIRROR_DEFAULT_TENANT_VISIBILITY": "public",
+		// Default OFF so blackbox suites - which test format-protocol
+		// conformance, NOT pull-through - are not affected by future
+		// changes to the upstream system. Integration tests opt in
+		// via Options.ExtraEnv.
+		"PKGMIRROR_UPSTREAM_DEFAULT_MODE": "off",
+	}
+	for k, v := range opts.ExtraEnv {
+		env[k] = v
+	}
+
 	req := testcontainers.ContainerRequest{
 		FromDockerfile: testcontainers.FromDockerfile{
 			Context:       repoRoot(t),
@@ -78,16 +126,8 @@ func Start(ctx context.Context, t *testing.T) *Stack {
 			KeepImage:     true,
 		},
 		ExposedPorts: []string{"8080/tcp"},
-		Env: map[string]string{
-			"PKGMIRROR_ADMIN_TOKEN":                bootstrapAdminToken,
-			// Public default tenant so the go toolchain can fetch over
-			// plain HTTP without needing credentials (Go refuses to send
-			// auth headers over HTTP regardless of GOAUTH/netrc/URL).
-			// Auth-gate behavior on private tenants is exercised by the
-			// in-process tests in internal/packages/goproxy.
-			"PKGMIRROR_DEFAULT_TENANT_VISIBILITY": "public",
-		},
-		Networks: []string{net.Name},
+		Env:          env,
+		Networks:     []string{net.Name},
 		NetworkAliases: map[string][]string{
 			net.Name: {pkgmirrorAlias},
 		},
