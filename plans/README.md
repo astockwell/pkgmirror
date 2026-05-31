@@ -22,6 +22,7 @@ scoped.
 | Doc | What it covers |
 | --- | --- |
 | [supply-chain-security-brainstorm.md](supply-chain-security-brainstorm.md) | Broader survey of supply-chain controls beyond the engine that already shipped — cooldowns, provenance, OSV, typosquat detection, tier promotion, etc. The shipped engine is the first slice of this list. |
+| [multi-tenant.md](multi-tenant.md) | Decision note on whether path-prefix multi-tenancy is viable for a SaaS shape (yes, except OCI), and where the real operational costs of multi-tenancy live. Not a plan to change anything; informs future "lean in" or "scale back" plans. |
 
 ## Implemented
 
