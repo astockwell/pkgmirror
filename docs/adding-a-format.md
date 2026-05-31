@@ -24,6 +24,12 @@ mirror supports. It's structured into five parts:
 Read this end-to-end before starting a new format. It will save you
 re-discovering the same wheel.
 
+> **Adding pull-through to an existing format?** See the companion
+> playbook [adding-jit-pull-through.md](adding-jit-pull-through.md).
+> This doc covers the upload + serve side; that one covers the cold-
+> miss fetch from a canonical public registry, policy gating on the
+> cold path, and the internet-connected integration test suite.
+
 ---
 
 ## Anatomy of a format
