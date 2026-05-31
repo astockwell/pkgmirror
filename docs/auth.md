@@ -5,6 +5,10 @@ and the per-format mechanics for how each ecosystem client supplies
 credentials. It is the spec for the current implementation and the design
 contract that future identity sources (OIDC, LDAP, mTLS, …) must conform to.
 
+For the URL routing model that makes multi-tenancy work end-to-end with
+real package toolchains (and the OCI nuance), see
+[multi-tenant.md](multi-tenant.md).
+
 ## Concepts
 
 ### Tenant
