@@ -11,7 +11,9 @@ documentation of features that **already exist**.
 
 ## In-flight
 
-_(none right now — submit one as `plans/<name>.md`)_
+| Plan | Status |
+| --- | --- |
+| [created-via-package-ownership.md](created-via-package-ownership.md) | Ready for review. Adds `packages.created_via` so the `/simple/` merge knows whether a package is tenant-uploaded (don't reach upstream) or pull-through-ingested (merge upstream). Closes the typosquat hole the recent merge opened. |
 
 ## Brainstorms / backlogs
 
