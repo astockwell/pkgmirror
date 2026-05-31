@@ -496,6 +496,7 @@ func (h *Handler) pullThroughDownload(c *gin.Context, tenant *tenants.Tenant, lo
 		Version:           useVersion,
 		Filename:          filename,
 		IsLead:            true,
+		CreatedVia:        models.CreatedViaPullThrough,
 	}, buf)
 	if err != nil && !errors.Is(err, models.ErrDuplicatePackageFile) {
 		return false, fmt.Errorf("persist upstream blob: %w", err)

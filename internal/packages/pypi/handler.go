@@ -215,6 +215,25 @@ func (h *Handler) upload(c *gin.Context) {
 		return
 	}
 
+	// Provenance gate: refuse uploads to a package that pkgmirror
+	// originally ingested via pull-through. Without this, an insider
+	// (or compromised CI token) could silently shadow an upstream
+	// package by uploading a 'newer' version that the /simple/ merge
+	// would then surface above the real upstream versions. The admin
+	// can either delete the package or flip its provenance to
+	// 'uploaded' via the console to take ownership. See
+	// plans/created-via-package-ownership.md.
+	if existing, perr := h.Models.GetPackageByLookup(c.Request.Context(), tenant.ID, models.TypePyPI, lookupName); perr == nil {
+		if existing.CreatedVia == models.CreatedViaPullThrough {
+			c.String(http.StatusConflict,
+				"package %q is currently mirrored from upstream; "+
+					"delete it via /console/tenants/%s/packages/pypi/%s "+
+					"first if you want to take ownership of this name",
+				existing.Name, tenant.Name, existing.LowerName)
+			return
+		}
+	}
+
 	_, ver, _, err := h.Service.CreatePackageOrAddFileToExisting(c.Request.Context(), pkgsvc.CreationInfo{
 		TenantID:          tenant.ID,
 		PackageType:       models.TypePyPI,
@@ -224,6 +243,7 @@ func (h *Handler) upload(c *gin.Context) {
 		VersionProperties: versionProps,
 		Filename:          fh.Filename,
 		IsLead:            true,
+		CreatedVia:        models.CreatedViaUploaded,
 	}, buf)
 	if err != nil {
 		if errors.Is(err, models.ErrDuplicatePackageFile) {
@@ -364,7 +384,18 @@ func (h *Handler) packageIndex(c *gin.Context) {
 	// Errors here (upstream off / 404 / transport blip) silently
 	// fall back to the local-only view; we have something useful
 	// to serve and the merge is a feature, not load-bearing.
-	upEntries, upVersions := h.mergeUpstreamIntoLocalIndex(c, tenant, name, localFilenames)
+	//
+	// Provenance gate: only merge when this package was originally
+	// pulled through. Tenant-uploaded packages are SEALED - we never
+	// reach upstream for their names, which (a) eliminates the
+	// typosquat hole the merge would otherwise open and (b) saves
+	// a round-trip on every /simple/ request for tenant-owned
+	// packages. See plans/created-via-package-ownership.md.
+	var upEntries []pypiFileEntry
+	var upVersions map[string]struct{}
+	if pkg.CreatedVia == models.CreatedViaPullThrough {
+		upEntries, upVersions = h.mergeUpstreamIntoLocalIndex(c, tenant, name, localFilenames)
+	}
 	for _, e := range upEntries {
 		files = append(files, fileEntry{
 			Filename: e.Filename,
