@@ -58,6 +58,9 @@ type policyFixture struct {
 	tenantName     string
 	tenantID       int64
 	models         *models.Store
+	db             *sql.DB
+	engine         *policy.ChainEngine
+	upstreamStore  stubUpstreamStore
 	freshVersion   string
 	freshSha       string
 	freshUnix      int64
@@ -281,6 +284,9 @@ func newPolicyFixture(t *testing.T, ruleConfig cooldown.Config, ruleAction strin
 		tenantName:     res.DefaultTenant.Name,
 		tenantID:       res.DefaultTenant.ID,
 		models:         pkgModels,
+		db:             db,
+		engine:         core,
+		upstreamStore:  store,
 		freshVersion:   freshVersion,
 		freshSha:       freshSha,
 		freshUnix:      freshUnix,
@@ -492,6 +498,121 @@ func TestPullThroughDownload_QuarantinePersistsButHidesBytes(t *testing.T) {
 	}
 	if strings.Contains(string(body3), f.freshVersion) {
 		t.Errorf("expected quarantined fresh version hidden from /simple/; got %s", body3)
+	}
+}
+
+// TestPullThroughIndex_MergesLocalAndUpstream proves the merge:
+// after a previous request persisted ONE version of `requests`
+// locally (via the cold pull-through path under an active cooldown),
+// turning off the cooldown and re-requesting /simple/requests/ now
+// returns BOTH the persisted version AND the freshly-allowed
+// upstream version - rather than serving local-only.
+//
+// This is the demo flow: cooldown active -> uv resolves to old
+// version, persisted; cooldown removed -> uv sees the new version
+// without anyone having to delete the local row.
+func TestPullThroughIndex_MergesLocalAndUpstream(t *testing.T) {
+	f := newPolicyFixture(t,
+		cooldown.Config{MinAgeDays: 45, TimeSource: cooldown.TimeSourceUpstreamPublish},
+		"deny",
+	)
+	base := "/api/packages/" + f.tenantName + "/pypi"
+
+	// Step 1: cooldown ON. Request the stale version's file - cold
+	// pull-through fetches + persists it.
+	resp, body := f.get(t, base+"/files/requests/"+f.staleVersion+
+		"/requests-"+f.staleVersion+"-py3-none-any.whl")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("seed request: status=%d body=%s", resp.StatusCode, body)
+	}
+
+	// Sanity: with the rule still active, /simple/ shows ONLY the
+	// stale version (fresh is still hidden).
+	resp, body = f.get(t, base+"/simple/requests/")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("simple-with-rule: status=%d body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), f.staleVersion) {
+		t.Errorf("rule active: expected stale version in /simple/; got %s", body)
+	}
+	if strings.Contains(string(body), f.freshVersion) {
+		t.Errorf("rule active: expected fresh version hidden from /simple/; got %s", body)
+	}
+
+	// Step 2: remove the cooldown rule.
+	store := policy.NewRuleStore(f.db)
+	rule, err := store.GetByName(context.Background(), "test-cooldown")
+	if err != nil {
+		t.Fatalf("lookup rule: %v", err)
+	}
+	if err := store.Delete(context.Background(), rule.ID); err != nil {
+		t.Fatalf("delete rule: %v", err)
+	}
+	if err := f.engine.PullFromStore(context.Background(), store); err != nil {
+		t.Fatalf("refresh engine: %v", err)
+	}
+
+	// Step 3: re-request /simple/. With the rule gone, the merge
+	// path should now include BOTH the locally-persisted stale
+	// version AND the freshly-permitted upstream version.
+	resp, body = f.get(t, base+"/simple/requests/")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("simple-no-rule: status=%d body=%s", resp.StatusCode, body)
+	}
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, f.staleVersion) {
+		t.Errorf("merged: expected stale (local) version present; got %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, f.freshVersion) {
+		t.Errorf("merged: expected fresh (upstream) version added; got %s", bodyStr)
+	}
+
+	// And no dupes - the stale version's URL must appear exactly
+	// once (local wins; upstream is deduped out by filename). We
+	// count the URL fragment rather than the filename because the
+	// rendered HTML repeats the filename as both href= and link
+	// text per <a> tag.
+	stalePath := "/files/requests/" + f.staleVersion + "/"
+	if got := strings.Count(bodyStr, stalePath); got != 1 {
+		t.Errorf("merged: expected stale URL fragment %q once, got %d in body:\n%s",
+			stalePath, got, bodyStr)
+	}
+}
+
+// TestPullThroughIndex_MergeFallsBackOnUpstreamFailure proves the
+// merge is best-effort: if pulling the upstream index fails (off
+// mode, transport error, etc.), packageIndex falls back to serving
+// just the local view rather than 5xx-ing.
+//
+// Setup: persist one version locally via the cold path, then turn
+// pull-through OFF for this (tenant, pypi). /simple/requests/
+// should still return 200 with the local row visible.
+func TestPullThroughIndex_MergeFallsBackOnUpstreamFailure(t *testing.T) {
+	f := newPolicyFixture(t,
+		cooldown.Config{MinAgeDays: 45, TimeSource: cooldown.TimeSourceUpstreamPublish},
+		"deny",
+	)
+	base := "/api/packages/" + f.tenantName + "/pypi"
+
+	// Seed the local row via cold pull-through.
+	resp, _ := f.get(t, base+"/files/requests/"+f.staleVersion+
+		"/requests-"+f.staleVersion+"-py3-none-any.whl")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("seed: status=%d", resp.StatusCode)
+	}
+
+	// Flip pull-through off for (tenant, pypi).
+	f.upstreamStore.rows[fmt.Sprintf("%d|pypi", f.tenantID)] = &upstream.PersistedConfig{
+		Mode: string(upstream.ModeOff),
+	}
+
+	// /simple/ should still answer 200 with the local version.
+	resp, body := f.get(t, base+"/simple/requests/")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("merge-after-off: status=%d body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), f.staleVersion) {
+		t.Errorf("expected local version still served when upstream off; got %s", body)
 	}
 }
 

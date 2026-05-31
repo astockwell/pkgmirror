@@ -231,43 +231,7 @@ func versionFromFilename(lookupName, filename string) string {
 // to populate Subject.Attrs["upstream_published_unix"] so the rule can
 // actually fire on first-sight of a fresh version.
 func (h *Handler) servePulledThroughIndex(c *gin.Context, tenant *tenants.Tenant, lookupName string, pkg *upstreamSimplePackage) {
-	// When the engine is the no-op (tests, dev with no rules) skip
-	// the Warehouse pre-fetch - it adds an upstream round-trip whose
-	// only purpose is to feed an evaluator that won't reject anything.
-	var publishedAt map[string]int64
-	if _, isNoop := h.Engine.(policy.NoopEngine); !isNoop {
-		publishedAt = h.fetchUpstreamPublishedAll(c, tenant, lookupName)
-	}
-
-	// Build the same structure the local rendering uses so the
-	// existing inline template can render it. Pull SHA-256 out of
-	// hashes; everything else (version, requires-python) we leave
-	// blank - pip/uv read the hash from the URL fragment regardless.
-	type fileEntry struct {
-		Filename       string
-		URL            string
-		SHA256         string
-		Size           int64
-		RequiresPython string
-	}
-	files := make([]fileEntry, 0, len(pkg.Files))
-	survivingVersions := map[string]struct{}{}
-	for _, f := range pkg.Files {
-		// Best-effort version-from-filename to build the local URL.
-		ver := versionFromFilename(pkg.Name, f.Filename)
-		if ver == "" {
-			ver = "0"
-		}
-		if h.Engine != nil && h.passthroughBlocked(c, tenant, lookupName, ver, f.Filename, publishedAt) {
-			continue
-		}
-		files = append(files, fileEntry{
-			Filename: f.Filename,
-			URL:      fmt.Sprintf("../../files/%s/%s/%s", pkg.Name, ver, f.Filename),
-			SHA256:   f.Hashes["sha256"],
-		})
-		survivingVersions[ver] = struct{}{}
-	}
+	entries, survivingVersions := h.upstreamFileEntries(c, tenant, lookupName, pkg, nil)
 	// Mirror the file-level filter into the Versions[] list so PEP 691
 	// consumers don't see ghost versions whose files were all dropped.
 	versions := make([]string, 0, len(pkg.Versions))
@@ -278,8 +242,8 @@ func (h *Handler) servePulledThroughIndex(c *gin.Context, tenant *tenants.Tenant
 	}
 	if wantsJSONSimple(c.Request) {
 		c.Header("Content-Type", "application/vnd.pypi.simple.v1+json")
-		jsonFiles := make([]jsonFile, len(files))
-		for i, f := range files {
+		jsonFiles := make([]jsonFile, len(entries))
+		for i, f := range entries {
 			jsonFiles[i] = jsonFile{
 				Filename: f.Filename,
 				URL:      f.URL,
@@ -297,8 +261,103 @@ func (h *Handler) servePulledThroughIndex(c *gin.Context, tenant *tenants.Tenant
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	_ = pulledThroughTmpl.Execute(c.Writer, struct {
 		Name  string
-		Files []fileEntry
-	}{Name: pkg.Name, Files: files})
+		Files []pypiFileEntry
+	}{Name: pkg.Name, Files: entries})
+}
+
+// pypiFileEntry is the shape both the local-rendering and pull-through
+// paths feed into the PEP 503 / PEP 691 templates. Hoisted from a
+// per-function local type so packageIndex can mix local + upstream
+// entries into one rendered response.
+type pypiFileEntry struct {
+	Filename       string
+	URL            string
+	SHA256         string
+	Size           int64
+	RequiresPython string
+}
+
+// upstreamFileEntries fetches the upstream PEP 691 payload-derived
+// entries, runs each through the policy engine (ActionRead) with
+// upstream_published_unix hydrated when a non-noop engine is in play,
+// and returns (entries, set of surviving version strings).
+//
+// skipFilenames lets callers (specifically packageIndex's merge path)
+// drop upstream entries whose filename already exists locally - so
+// the rendered index doesn't list two URLs for the same wheel. Empty
+// or nil means "include everything that passes policy".
+func (h *Handler) upstreamFileEntries(
+	c *gin.Context,
+	tenant *tenants.Tenant,
+	lookupName string,
+	pkg *upstreamSimplePackage,
+	skipFilenames map[string]struct{},
+) ([]pypiFileEntry, map[string]struct{}) {
+	// When the engine is the no-op (tests, dev with no rules) skip
+	// the Warehouse pre-fetch - it adds an upstream round-trip whose
+	// only purpose is to feed an evaluator that won't reject anything.
+	var publishedAt map[string]int64
+	if _, isNoop := h.Engine.(policy.NoopEngine); !isNoop {
+		publishedAt = h.fetchUpstreamPublishedAll(c, tenant, lookupName)
+	}
+
+	entries := make([]pypiFileEntry, 0, len(pkg.Files))
+	survivingVersions := map[string]struct{}{}
+	for _, f := range pkg.Files {
+		if _, dup := skipFilenames[f.Filename]; dup {
+			continue
+		}
+		// Best-effort version-from-filename to build the local URL.
+		ver := versionFromFilename(pkg.Name, f.Filename)
+		if ver == "" {
+			ver = "0"
+		}
+		if h.Engine != nil && h.passthroughBlocked(c, tenant, lookupName, ver, f.Filename, publishedAt) {
+			continue
+		}
+		entries = append(entries, pypiFileEntry{
+			Filename: f.Filename,
+			URL:      fmt.Sprintf("../../files/%s/%s/%s", pkg.Name, ver, f.Filename),
+			SHA256:   f.Hashes["sha256"],
+		})
+		survivingVersions[ver] = struct{}{}
+	}
+	return entries, survivingVersions
+}
+
+// mergeUpstreamIntoLocalIndex is the merge-path helper packageIndex
+// calls when (a) pull-through is enabled and (b) the package exists
+// locally. Fetches the upstream PEP 691 index, runs each upstream
+// file through the policy engine, and returns the additions that
+// should be appended to the local file list (filenames already in
+// local are deduped out).
+//
+// Best-effort: any upstream failure (off mode, not found, transport
+// error) returns (nil, nil) and the caller serves local-only.
+// Crucially this does NOT propagate upstream 5xx as a 502 - merging
+// is a feature; falling back to the local view on upstream trouble is
+// the right behavior for a known-local package.
+//
+// versionSet is the set of upstream versions whose files survived the
+// policy filter; callers union this with their local versions list
+// for the rendered Versions[] section.
+func (h *Handler) mergeUpstreamIntoLocalIndex(
+	c *gin.Context,
+	tenant *tenants.Tenant,
+	lookupName string,
+	skipFilenames map[string]struct{},
+) (entries []pypiFileEntry, versionSet map[string]struct{}) {
+	if !h.passthroughEnabled(c, tenant) {
+		return nil, nil
+	}
+	up, err := h.fetchUpstreamSimple(c, tenant, lookupName)
+	if err != nil {
+		// Upstream off, not found, transport error: silently fall
+		// back to local-only. We have a local view that's perfectly
+		// servable; this isn't a 5xx-worthy condition.
+		return nil, nil
+	}
+	return h.upstreamFileEntries(c, tenant, lookupName, up, skipFilenames)
 }
 
 // passthroughBlocked builds a synthetic Subject for an upstream file we

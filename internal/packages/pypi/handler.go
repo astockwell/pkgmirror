@@ -330,6 +330,8 @@ func (h *Handler) packageIndex(c *gin.Context) {
 		RequiresPython string
 	}
 	var files []fileEntry
+	localFilenames := map[string]struct{}{}
+	localVersions := map[string]struct{}{}
 	for _, v := range versions {
 		fs, err := h.Models.ListFilesByVersion(c.Request.Context(), v.ID)
 		if err != nil {
@@ -347,8 +349,41 @@ func (h *Handler) packageIndex(c *gin.Context) {
 				Size:           size,
 				RequiresPython: reqPy,
 			})
+			localFilenames[f.Name] = struct{}{}
 		}
+		localVersions[v.Version] = struct{}{}
 	}
+
+	// Merge: pull the upstream index too (when pull-through is on)
+	// and add any upstream files whose filename isn't already in
+	// local AND pass the policy gate. This is the "the package now
+	// exists locally, but a freshly-allowed-by-policy upstream
+	// version should still show up" case - e.g. after a cooldown
+	// rule's window elapses, or after the rule is disabled.
+	//
+	// Errors here (upstream off / 404 / transport blip) silently
+	// fall back to the local-only view; we have something useful
+	// to serve and the merge is a feature, not load-bearing.
+	upEntries, upVersions := h.mergeUpstreamIntoLocalIndex(c, tenant, name, localFilenames)
+	for _, e := range upEntries {
+		files = append(files, fileEntry{
+			Filename: e.Filename,
+			URL:      e.URL,
+			SHA256:   e.SHA256,
+		})
+	}
+	// Union the version lists for PEP 691 consumers.
+	mergedVersions := make([]string, 0, len(versions)+len(upVersions))
+	for _, v := range versions {
+		mergedVersions = append(mergedVersions, v.Version)
+	}
+	for v := range upVersions {
+		if _, dup := localVersions[v]; dup {
+			continue
+		}
+		mergedVersions = append(mergedVersions, v)
+	}
+	sort.Strings(mergedVersions)
 
 	if wantsJSONSimple(c.Request) {
 		c.Header("Content-Type", "application/vnd.pypi.simple.v1+json")
@@ -362,14 +397,10 @@ func (h *Handler) packageIndex(c *gin.Context) {
 				Size:           f.Size,
 			}
 		}
-		verStrings := make([]string, len(versions))
-		for i, v := range versions {
-			verStrings[i] = v.Version
-		}
 		_ = json.NewEncoder(c.Writer).Encode(jsonPackage{
 			Name:     pkg.Name,
 			Meta:     jsonMeta{APIVersion: "1.0"},
-			Versions: verStrings,
+			Versions: mergedVersions,
 			Files:    jsonFiles,
 		})
 		return
