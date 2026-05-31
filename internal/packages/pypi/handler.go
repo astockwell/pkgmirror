@@ -299,7 +299,7 @@ func (h *Handler) packageIndex(c *gin.Context) {
 			if h.passthroughEnabled(c, tenant) {
 				up, ferr := h.fetchUpstreamSimple(c, tenant, name)
 				if ferr == nil {
-					h.servePulledThroughIndex(c, up)
+					h.servePulledThroughIndex(c, tenant, name, up)
 					return
 				}
 				code, msg := mapUpstreamErr(ferr)

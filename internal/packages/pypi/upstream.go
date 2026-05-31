@@ -35,6 +35,7 @@ import (
 
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
+	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/upstream"
 
@@ -218,7 +219,26 @@ func versionFromFilename(lookupName, filename string) string {
 // Tenant name is in the URL path so the rewritten links are absolute-
 // relative to the API root. We use ../../files/... (matching the
 // hand-uploaded path style elsewhere in the handler).
-func (h *Handler) servePulledThroughIndex(c *gin.Context, pkg *upstreamSimplePackage) {
+//
+// Each upstream file is evaluated through the policy Engine with
+// ActionRead before being included. This prevents cooldown / blocklist
+// rules from being trivially bypassed by the cold-cache path - without
+// this filter, uv would see every upstream version, pick the newest,
+// and only discover the policy on the /files/ miss path (where today
+// it isn't enforced either). When a cooldown rule uses
+// time_source: upstream_publish, the filter does ONE extra package-
+// level Warehouse JSON fetch (cached by the fetcher's metadata cache)
+// to populate Subject.Attrs["upstream_published_unix"] so the rule can
+// actually fire on first-sight of a fresh version.
+func (h *Handler) servePulledThroughIndex(c *gin.Context, tenant *tenants.Tenant, lookupName string, pkg *upstreamSimplePackage) {
+	// When the engine is the no-op (tests, dev with no rules) skip
+	// the Warehouse pre-fetch - it adds an upstream round-trip whose
+	// only purpose is to feed an evaluator that won't reject anything.
+	var publishedAt map[string]int64
+	if _, isNoop := h.Engine.(policy.NoopEngine); !isNoop {
+		publishedAt = h.fetchUpstreamPublishedAll(c, tenant, lookupName)
+	}
+
 	// Build the same structure the local rendering uses so the
 	// existing inline template can render it. Pull SHA-256 out of
 	// hashes; everything else (version, requires-python) we leave
@@ -231,17 +251,30 @@ func (h *Handler) servePulledThroughIndex(c *gin.Context, pkg *upstreamSimplePac
 		RequiresPython string
 	}
 	files := make([]fileEntry, 0, len(pkg.Files))
+	survivingVersions := map[string]struct{}{}
 	for _, f := range pkg.Files {
 		// Best-effort version-from-filename to build the local URL.
 		ver := versionFromFilename(pkg.Name, f.Filename)
 		if ver == "" {
 			ver = "0"
 		}
+		if h.Engine != nil && h.passthroughBlocked(c, tenant, lookupName, ver, f.Filename, publishedAt) {
+			continue
+		}
 		files = append(files, fileEntry{
 			Filename: f.Filename,
 			URL:      fmt.Sprintf("../../files/%s/%s/%s", pkg.Name, ver, f.Filename),
 			SHA256:   f.Hashes["sha256"],
 		})
+		survivingVersions[ver] = struct{}{}
+	}
+	// Mirror the file-level filter into the Versions[] list so PEP 691
+	// consumers don't see ghost versions whose files were all dropped.
+	versions := make([]string, 0, len(pkg.Versions))
+	for _, v := range pkg.Versions {
+		if _, ok := survivingVersions[v]; ok {
+			versions = append(versions, v)
+		}
 	}
 	if wantsJSONSimple(c.Request) {
 		c.Header("Content-Type", "application/vnd.pypi.simple.v1+json")
@@ -256,7 +289,7 @@ func (h *Handler) servePulledThroughIndex(c *gin.Context, pkg *upstreamSimplePac
 		_ = json.NewEncoder(c.Writer).Encode(jsonPackage{
 			Name:     pkg.Name,
 			Meta:     jsonMeta{APIVersion: "1.0"},
-			Versions: pkg.Versions,
+			Versions: versions,
 			Files:    jsonFiles,
 		})
 		return
@@ -268,14 +301,47 @@ func (h *Handler) servePulledThroughIndex(c *gin.Context, pkg *upstreamSimplePac
 	}{Name: pkg.Name, Files: files})
 }
 
+// passthroughBlocked builds a synthetic Subject for an upstream file we
+// haven't ingested yet and asks the policy engine whether ActionRead
+// would be blocked. The Subject carries ingest_age_seconds=0 (a fresh
+// ingest is what *would* happen if uv asked for this file) plus the
+// upstream publish time if we have it, so cooldown and blocklist rules
+// fire identically to the post-ingest path.
+func (h *Handler) passthroughBlocked(c *gin.Context, tenant *tenants.Tenant, lookupName, version, filename string, publishedAt map[string]int64) bool {
+	subj := policy.Subject{
+		TenantID: tenant.ID,
+		Format:   string(models.TypePyPI),
+		Package:  lookupName,
+		Version:  version,
+		Filename: filename,
+		Attrs: map[string]any{
+			"ingest_age_seconds": int64(0),
+			"created_unix":       time.Now().Unix(),
+		},
+	}
+	if pub, ok := publishedAt[version]; ok && pub > 0 {
+		subj.Attrs["upstream_published_unix"] = pub
+	}
+	r := h.Engine.Evaluate(c.Request.Context(), subj, policy.ActionRead)
+	return r.IsBlocked()
+}
+
 // pullThroughDownload finds the upstream entry for filename, fetches
 // it via the upstream Fetcher (size-capped + allowlisted), verifies
 // the sha256 if upstream provided one, and persists through the
 // regular ingest pipeline so a second request hits the local cache.
 //
 // Returns (true, nil) on success after writing the file to c.Writer.
-// (false, nil) when caller should fall through to a 404. (false, err)
-// on an internal error - caller writes 502/500 with the message.
+// pullThroughDownload finds the upstream entry for filename, fetches
+// it via the upstream Fetcher (size-capped + allowlisted), verifies
+// the sha256 if upstream provided one, and persists through the
+// regular ingest pipeline so a second request hits the local cache.
+//
+// Returns (true, nil) when this function has written the HTTP response
+// (either the file bytes on success, or a 403 when policy denies the
+// ingest). (false, nil) when caller should fall through to a 404.
+// (false, err) on an internal error - caller writes 502/500 with the
+// message.
 func (h *Handler) pullThroughDownload(c *gin.Context, tenant *tenants.Tenant, lookupName, version, filename string) (bool, error) {
 	if h.Upstream == nil {
 		return false, nil
@@ -298,6 +364,42 @@ func (h *Handler) pullThroughDownload(c *gin.Context, tenant *tenants.Tenant, lo
 	}
 	if entry == nil {
 		return false, nil
+	}
+
+	// Resolve the version we'll persist under up-front so the policy
+	// check, the persist call, and the Warehouse stamp all agree on it.
+	useVersion := versionFromFilename(lookupName, filename)
+	if useVersion == "" {
+		useVersion = version
+	}
+
+	// Policy gate, evaluated BEFORE the blob fetch so a denied version
+	// also saves the upstream bandwidth. The publish-time lookup is
+	// best-effort: on failure the cooldown evaluator falls back to
+	// ingest age (which for a not-yet-persisted ingest is 0, so an
+	// ingest-source cooldown will still block - that's the correct
+	// behavior for "everything is fresh").
+	pubUnix, havePub := h.fetchUpstreamPublishedForVersion(c, tenant, lookupName, useVersion)
+	if h.Engine != nil {
+		subj := policy.Subject{
+			TenantID: tenant.ID,
+			Format:   string(models.TypePyPI),
+			Package:  lookupName,
+			Version:  useVersion,
+			Filename: filename,
+			Attrs: map[string]any{
+				"ingest_age_seconds": int64(0),
+				"created_unix":       time.Now().Unix(),
+			},
+		}
+		if havePub {
+			subj.Attrs["upstream_published_unix"] = pubUnix
+		}
+		r := h.Engine.Evaluate(c.Request.Context(), subj, policy.ActionIngest)
+		if r.Decision >= policy.Deny {
+			c.String(http.StatusForbidden, "%s", policyReason(r))
+			return true, nil
+		}
 	}
 
 	blobReq := upstream.Request{
@@ -327,13 +429,6 @@ func (h *Handler) pullThroughDownload(c *gin.Context, tenant *tenants.Tenant, lo
 		return false, fmt.Errorf("sha256 mismatch: upstream=%s got=%s", want, sha256Hex)
 	}
 
-	// Use the entry's parsed version if we have a confident one;
-	// fall back to the client-provided URL :version param otherwise.
-	useVersion := versionFromFilename(lookupName, filename)
-	if useVersion == "" {
-		useVersion = version
-	}
-
 	_, _, _, err = h.Service.CreatePackageOrAddFileToExisting(c.Request.Context(), pkgsvc.CreationInfo{
 		TenantID:          tenant.ID,
 		PackageType:       models.TypePyPI,
@@ -360,11 +455,16 @@ func (h *Handler) pullThroughDownload(c *gin.Context, tenant *tenants.Tenant, lo
 
 	// Best-effort: stamp the version with upstream's publish time so
 	// the cooldown evaluator's time_source: upstream_publish mode can
-	// gate by upstream age, not by ingest age. Failure here is logged
-	// but never blocks the download - the cooldown rule will just fall
-	// back to ingest age (see internal/policy/cooldown ageSecondsFor).
+	// gate by upstream age, not by ingest age. We already fetched this
+	// up-front for the policy check; persist that value instead of
+	// re-fetching. Fall back to the post-ingest Warehouse hop only
+	// when the pre-fetch failed.
 	if !ver.UpstreamPublishedUnix.Valid {
-		h.stampUpstreamPublished(c, tenant, ver, lookupName, useVersion)
+		if havePub {
+			_ = h.Models.SetUpstreamPublishedUnix(c.Request.Context(), ver.ID, pubUnix)
+		} else {
+			h.stampUpstreamPublished(c, tenant, ver, lookupName, useVersion)
+		}
 	}
 
 	files, err := h.Models.ListFilesByVersion(c.Request.Context(), ver.ID)
@@ -533,4 +633,118 @@ func earliestUpload(p warehouseURLs) int64 {
 		}
 	}
 	return min
+}
+
+// fetchUpstreamPublishedForVersion returns the earliest upstream upload
+// time for (lookupName, version) as a unix timestamp. Best-effort: any
+// failure (mirror doesn't speak Warehouse JSON, network blip, parse
+// error) returns (0, false) so the caller can fall back to ingest age.
+//
+// Used by the pull-through ingest path to populate
+// Subject.Attrs["upstream_published_unix"] BEFORE policy evaluation,
+// and to stamp package_versions.upstream_published_unix without
+// re-fetching post-ingest.
+func (h *Handler) fetchUpstreamPublishedForVersion(c *gin.Context, tenant *tenants.Tenant, lookupName, version string) (int64, bool) {
+	if h.Upstream == nil {
+		return 0, false
+	}
+	req := upstream.Request{
+		TenantID:     tenant.ID,
+		Format:       "pypi",
+		Kind:         upstream.KindMetadata,
+		UpstreamPath: "/pypi/" + lookupName + "/" + version + "/json",
+		CanonicalKey: fmt.Sprintf("pypi:%d:%s:%s:warehouse", tenant.ID, lookupName, version),
+	}
+	res, err := h.Upstream.Fetch(c.Request.Context(), req)
+	if err != nil {
+		return 0, false
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return 0, false
+	}
+	var payload warehouseURLs
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return 0, false
+	}
+	t := earliestUpload(payload)
+	if t == 0 {
+		return 0, false
+	}
+	return t, true
+}
+
+// warehouseReleases is the JSON shape of pypi.org/pypi/<name>/json
+// for the bits we need: a releases object keyed by version, each
+// holding one or more uploaded files.
+type warehouseReleases struct {
+	Releases map[string][]struct {
+		UploadTimeISO8601 string `json:"upload_time_iso_8601"`
+	} `json:"releases"`
+}
+
+// fetchUpstreamPublishedAll fetches the package-level Warehouse JSON
+// (/pypi/<name>/json) and returns a map of version → earliest upload
+// time. Used by the cold pull-through /simple/ filter to populate
+// Subject.Attrs["upstream_published_unix"] for every candidate file in
+// one round-trip, so cooldown rules with time_source: upstream_publish
+// can run BEFORE any download (otherwise uv just gets the full
+// upstream catalog and only sees the policy on download miss, by
+// which point the resolver has already locked in a denied version).
+//
+// Best-effort: any failure returns nil. Cached by the fetcher's
+// metadata cache so subsequent cold /simple/ requests for the same
+// package within TTL are free.
+func (h *Handler) fetchUpstreamPublishedAll(c *gin.Context, tenant *tenants.Tenant, lookupName string) map[string]int64 {
+	if h.Upstream == nil {
+		return nil
+	}
+	req := upstream.Request{
+		TenantID:     tenant.ID,
+		Format:       "pypi",
+		Kind:         upstream.KindMetadata,
+		UpstreamPath: "/pypi/" + lookupName + "/json",
+		CanonicalKey: fmt.Sprintf("pypi:%d:%s:warehouse-all", tenant.ID, lookupName),
+	}
+	res, err := h.Upstream.Fetch(c.Request.Context(), req)
+	if err != nil {
+		return nil
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil
+	}
+	var payload warehouseReleases
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil
+	}
+	if len(payload.Releases) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(payload.Releases))
+	for ver, files := range payload.Releases {
+		var min int64
+		for _, f := range files {
+			t, err := time.Parse(time.RFC3339, f.UploadTimeISO8601)
+			if err != nil {
+				t, err = time.Parse(time.RFC3339Nano, f.UploadTimeISO8601)
+				if err != nil {
+					continue
+				}
+			}
+			ts := t.Unix()
+			if ts <= 0 {
+				continue
+			}
+			if min == 0 || ts < min {
+				min = ts
+			}
+		}
+		if min > 0 {
+			out[ver] = min
+		}
+	}
+	return out
 }
