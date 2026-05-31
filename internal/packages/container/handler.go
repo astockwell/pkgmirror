@@ -361,7 +361,7 @@ func (h *Handler) requireWrite(c *gin.Context, tenant *tenants.Tenant) bool {
 // case-insensitive in practice.
 func (h *Handler) repoPackage(c *gin.Context, tenant *tenants.Tenant, image string) (*models.Package, error) {
 	lower := strings.ToLower(image)
-	pkg, err := h.Models.GetOrCreatePackageWithLookup(c.Request.Context(), tenant.ID, models.TypeContainer, lower, lower)
+	pkg, err := h.Models.GetOrCreatePackageWithLookup(c.Request.Context(), tenant.ID, models.TypeContainer, lower, lower, models.CreatedViaUploaded)
 	if err != nil {
 		return nil, err
 	}

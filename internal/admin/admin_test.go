@@ -248,7 +248,7 @@ func TestAdmin_QuarantineLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert a package + version directly via the model layer.
-	pkg, err := f.models.GetOrCreatePackage(ctx, f.tenant.ID, models.TypePyPI, "foo")
+	pkg, err := f.models.GetOrCreatePackage(ctx, f.tenant.ID, models.TypePyPI, "foo", models.CreatedViaUploaded)
 	if err != nil {
 		t.Fatalf("create pkg: %v", err)
 	}

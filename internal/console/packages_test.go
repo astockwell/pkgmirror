@@ -46,7 +46,7 @@ func TestPackageDetail_ShowsVersions(t *testing.T) {
 	f := newAuthFixture(t)
 	f.CreateAdmin(t, "alice", "correct-password-12chars")
 	tenant, _ := f.Tenants.Create(context.Background(), "team", tenants.VisibilityPrivate)
-	pkg, err := f.Models.GetOrCreatePackage(context.Background(), tenant.ID, models.Type("npm"), "left-pad")
+	pkg, err := f.Models.GetOrCreatePackage(context.Background(), tenant.ID, models.Type("npm"), "left-pad", models.CreatedViaUploaded)
 	if err != nil {
 		t.Fatalf("create package: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestQuarantine_PromoteFlow(t *testing.T) {
 	f := newAuthFixture(t)
 	f.CreateAdmin(t, "alice", "correct-password-12chars")
 	tenant, _ := f.Tenants.Create(context.Background(), "team", tenants.VisibilityPrivate)
-	pkg, _ := f.Models.GetOrCreatePackage(context.Background(), tenant.ID, models.Type("npm"), "evilpkg")
+	pkg, _ := f.Models.GetOrCreatePackage(context.Background(), tenant.ID, models.Type("npm"), "evilpkg", models.CreatedViaUploaded)
 	ver, _ := f.Models.CreateVersion(context.Background(), pkg.ID, "0.1.0", "{}")
 	// Quarantine it.
 	if err := f.Models.QuarantineVersion(context.Background(), ver.ID, 0, "test-policy"); err != nil {

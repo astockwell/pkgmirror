@@ -30,7 +30,7 @@ func makeTestPackage(t *testing.T, f *authFixture, tenantName, pkgType, pkgName 
 			t.Fatalf("create tenant: %v", err)
 		}
 	}
-	pkg, err := f.Models.GetOrCreatePackage(context.Background(), tenant.ID, models.Type(pkgType), pkgName)
+	pkg, err := f.Models.GetOrCreatePackage(context.Background(), tenant.ID, models.Type(pkgType), pkgName, models.CreatedViaUploaded)
 	if err != nil {
 		t.Fatalf("create package: %v", err)
 	}

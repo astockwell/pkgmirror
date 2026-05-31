@@ -257,7 +257,7 @@ func publicKeyFingerprint(pub *rsa.PublicKey) ([]byte, error) {
 // "internal package" convention so an operator inspecting the DB will
 // recognise the layout.
 func GetOrCreateKeyPair(ctx context.Context, m *models.Store, tenantID int64, bits int) (privatePEM, publicPEM string, err error) {
-	pkg, err := m.GetOrCreatePackage(ctx, tenantID, models.TypeAlpine, RepositoryPackage)
+	pkg, err := m.GetOrCreatePackage(ctx, tenantID, models.TypeAlpine, RepositoryPackage, models.CreatedViaUploaded)
 	if err != nil {
 		return "", "", err
 	}

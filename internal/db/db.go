@@ -282,6 +282,32 @@ CREATE TABLE IF NOT EXISTS tenant_upstreams (
 ALTER TABLE package_versions
     ADD COLUMN upstream_published_unix INTEGER;
 `,
+	// v5 -> v6: packages.created_via.
+	//
+	// Marks how each package row first came into existence:
+	//   'uploaded'      - a human (or CI publish step) put this package
+	//                     into pkgmirror first. The /simple/ merge
+	//                     SKIPS upstream for this package, and uploads
+	//                     to it continue to succeed. Typosquat-safe:
+	//                     a same-named upstream package can never shadow
+	//                     a tenant-owned name.
+	//   'pull_through'  - pkgmirror first ingested this package via
+	//                     upstream pull-through. The /simple/ merge
+	//                     includes upstream, and a manual upload to the
+	//                     same name is REFUSED with 409 (admin must
+	//                     delete first or flip the flag).
+	//
+	// Default 'uploaded' is the conservative migration value: existing
+	// rows that were originally pull-through-ingested will need to be
+	// flipped via the admin console (or a one-liner UPDATE). Defaulting
+	// to 'pull_through' instead would re-open the typosquat hole for
+	// every pre-existing tenant-uploaded package.
+	//
+	// See plans/created-via-package-ownership.md.
+	`
+ALTER TABLE packages
+    ADD COLUMN created_via TEXT NOT NULL DEFAULT 'uploaded';
+`,
 }
 
 // Open opens (and creates if missing) the SQLite database at path and brings

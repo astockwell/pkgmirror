@@ -25,13 +25,13 @@ func TestSchemaV5_TenantUpstreamsAndUpstreamPublishedUnix(t *testing.T) {
 
 	ctx := context.Background()
 
-	// PRAGMA user_version should be 5 after a fresh open.
+	// PRAGMA user_version should be 6 after a fresh open.
 	var ver int
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&ver); err != nil {
 		t.Fatalf("read user_version: %v", err)
 	}
-	if ver != 5 {
-		t.Errorf("user_version = %d, want 5", ver)
+	if ver != 6 {
+		t.Errorf("user_version = %d, want 6", ver)
 	}
 
 	// tenant_upstreams: insert a row covering every column.
@@ -181,5 +181,66 @@ func TestSchemaV5_TenantCascade(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("expected cascade to drop tenant_upstreams rows; got %d remaining", n)
+	}
+}
+
+// TestSchemaV6_PackagesCreatedVia verifies migration v6:
+//
+//   - packages.created_via column exists and is NOT NULL
+//   - default value 'uploaded' is applied to rows inserted without it
+//   - any string value is accepted by the column (no CHECK constraint;
+//     the application layer guards via models.CreatedVia.Valid())
+//
+// Inserts BOTH a row without created_via (forcing the DEFAULT) AND a
+// row with an explicit created_via to cover both paths the application
+// uses on production code paths.
+func TestSchemaV6_PackagesCreatedVia(t *testing.T) {
+	dir := t.TempDir()
+	db, err := pkgdb.Open(filepath.Join(dir, "v6.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+
+	// Row 1: omit created_via -> DEFAULT 'uploaded' applies.
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO packages (id, tenant_id, type, name, lower_name, created_unix)
+		VALUES (1, 1, 'pypi', 'Default-Provenance', 'default-provenance', 1700000000)
+	`); err != nil {
+		t.Fatalf("insert row 1: %v", err)
+	}
+	// Row 2: explicit 'pull_through'.
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO packages (id, tenant_id, type, name, lower_name, created_unix, created_via)
+		VALUES (2, 1, 'pypi', 'Explicit-Provenance', 'explicit-provenance', 1700000001, 'pull_through')
+	`); err != nil {
+		t.Fatalf("insert row 2: %v", err)
+	}
+
+	var via1, via2 string
+	if err := db.QueryRowContext(ctx,
+		`SELECT created_via FROM packages WHERE id = 1`).Scan(&via1); err != nil {
+		t.Fatalf("read row 1 created_via: %v", err)
+	}
+	if via1 != "uploaded" {
+		t.Errorf("default created_via = %q, want \"uploaded\"", via1)
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT created_via FROM packages WHERE id = 2`).Scan(&via2); err != nil {
+		t.Fatalf("read row 2 created_via: %v", err)
+	}
+	if via2 != "pull_through" {
+		t.Errorf("explicit created_via = %q, want \"pull_through\"", via2)
+	}
+
+	// NULL must be rejected by the NOT NULL constraint.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO packages (id, tenant_id, type, name, lower_name, created_unix, created_via)
+		VALUES (3, 1, 'pypi', 'Null-Provenance', 'null-provenance', 1700000002, NULL)
+	`)
+	if err == nil {
+		t.Error("expected NULL created_via to be rejected by NOT NULL constraint; got no error")
 	}
 }

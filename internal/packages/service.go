@@ -150,19 +150,32 @@ type CreationInfo struct {
 	// PackageLookupName, if non-empty, is the canonical lookup key for the
 	// package — e.g. PyPI's PEP 503-normalized name. Empty means "use
 	// strings.ToLower(PackageName)".
-	PackageLookupName   string
-	Version             string
+	PackageLookupName string
+	Version           string
 	VersionProperties   map[string]string
 	VersionMetadataJSON string
 	Filename            string
 	IsLead              bool
+	// CreatedVia is the provenance marker to use when this is the
+	// FIRST time pkgmirror has seen this (tenant, package); ignored
+	// when the package row already exists. Empty defaults to
+	// CreatedViaUploaded - the safer value if a caller forgets.
+	// Per-format pull-through adapters MUST set this to
+	// CreatedViaPullThrough; upload handlers may leave it zero or
+	// set CreatedViaUploaded explicitly. See plans/created-via-
+	// package-ownership.md.
+	CreatedVia models.CreatedVia
 }
 
 func (info CreationInfo) getOrCreatePackage(ctx context.Context, m *models.Store) (*models.Package, error) {
-	if info.PackageLookupName != "" {
-		return m.GetOrCreatePackageWithLookup(ctx, info.TenantID, info.PackageType, info.PackageName, info.PackageLookupName)
+	via := info.CreatedVia
+	if via == "" {
+		via = models.CreatedViaUploaded
 	}
-	return m.GetOrCreatePackage(ctx, info.TenantID, info.PackageType, info.PackageName)
+	if info.PackageLookupName != "" {
+		return m.GetOrCreatePackageWithLookup(ctx, info.TenantID, info.PackageType, info.PackageName, info.PackageLookupName, via)
+	}
+	return m.GetOrCreatePackage(ctx, info.TenantID, info.PackageType, info.PackageName, via)
 }
 
 // CreatePackageAndAddFile creates (or fetches) the package, creates the

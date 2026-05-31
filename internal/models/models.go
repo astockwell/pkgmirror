@@ -57,6 +57,47 @@ type Package struct {
 	Name        string
 	LowerName   string
 	CreatedUnix int64
+	// CreatedVia identifies how this package row first came into
+	// existence. Sticky after initial INSERT; only changes via admin
+	// override or a delete + recreate. Controls whether the per-format
+	// /index/ merge reaches upstream for this (tenant, package). See
+	// plans/created-via-package-ownership.md for the security rationale.
+	CreatedVia CreatedVia
+}
+
+// CreatedVia identifies the provenance of a packages row. See
+// plans/created-via-package-ownership.md for why this is per-package
+// (not per-version) and how the per-format handlers should consume it.
+type CreatedVia string
+
+const (
+	// CreatedViaUploaded means a tenant-owned upload (twine, raw PUT,
+	// bulk-import tooling) put the package into pkgmirror first.
+	// The per-format /simple/ merge MUST NOT reach upstream for this
+	// package; upstream is never contacted, so a typosquat sharing the
+	// name can never shadow the tenant's package. New uploads continue
+	// to succeed (they only fail when racing against an existing row of
+	// the opposite provenance).
+	CreatedViaUploaded CreatedVia = "uploaded"
+	// CreatedViaPullThrough means pkgmirror first ingested this package
+	// on a cold pull-through miss. The /simple/ merge includes upstream;
+	// a subsequent manual upload to the same name MUST be refused with
+	// 409 (admin can delete the package or flip the flag to take
+	// ownership; otherwise an insider could silently shadow upstream
+	// versions with a uploaded 'newer' one).
+	CreatedViaPullThrough CreatedVia = "pull_through"
+)
+
+// Valid reports whether v is a recognized provenance value. Handlers
+// should pass this guard before persisting to the column - the schema
+// DEFAULT catches forgotten sets at the DB layer, but Valid catches
+// typos before they hit a NOT NULL constraint.
+func (v CreatedVia) Valid() bool {
+	switch v {
+	case CreatedViaUploaded, CreatedViaPullThrough:
+		return true
+	}
+	return false
 }
 
 // Version represents a specific version of a package.
@@ -131,9 +172,16 @@ func New(db *sql.DB) *Store { return &Store{DB: db} }
 // ----- Packages -----
 
 // GetOrCreatePackage returns the package within the given tenant matching
-// (type, name), creating it if needed.
-func (s *Store) GetOrCreatePackage(ctx context.Context, tenantID int64, t Type, name string) (*Package, error) {
-	return s.GetOrCreatePackageWithLookup(ctx, tenantID, t, name, strings.ToLower(name))
+// (type, name), creating it if needed. When creating a new row, the
+// supplied createdVia is persisted; when the row already exists, the
+// existing CreatedVia is preserved unchanged (callers that want to
+// change it must use SetPackageCreatedVia).
+//
+// Pass CreatedViaUploaded for upload handlers, CreatedViaPullThrough
+// for pull-through ingest paths. See plans/created-via-package-
+// ownership.md.
+func (s *Store) GetOrCreatePackage(ctx context.Context, tenantID int64, t Type, name string, createdVia CreatedVia) (*Package, error) {
+	return s.GetOrCreatePackageWithLookup(ctx, tenantID, t, name, strings.ToLower(name), createdVia)
 }
 
 // GetOrCreatePackageWithLookup is GetOrCreatePackage with an explicit
@@ -141,24 +189,34 @@ func (s *Store) GetOrCreatePackage(ctx context.Context, tenantID int64, t Type, 
 // (e.g. PyPI's PEP 503 normalization), where the display name should
 // preserve the user-supplied form but lookups must match the canonical
 // key. The lookup key MUST already be lowercased / canonicalized.
-func (s *Store) GetOrCreatePackageWithLookup(ctx context.Context, tenantID int64, t Type, displayName, lookupName string) (*Package, error) {
+func (s *Store) GetOrCreatePackageWithLookup(ctx context.Context, tenantID int64, t Type, displayName, lookupName string, createdVia CreatedVia) (*Package, error) {
 	if p, err := s.GetPackageByLookup(ctx, tenantID, t, lookupName); err == nil {
 		return p, nil
 	} else if !errors.Is(err, ErrPackageNotExist) {
 		return nil, err
 	}
 
+	// Default to the safer value if a caller forgets - the DB DEFAULT
+	// would catch it too, but staying explicit at the application layer
+	// keeps the audit-row inputs consistent.
+	if !createdVia.Valid() {
+		createdVia = CreatedViaUploaded
+	}
+
 	now := time.Now().Unix()
 	res, err := s.DB.ExecContext(ctx,
-		`INSERT INTO packages (tenant_id, type, name, lower_name, created_unix)
-		 VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO packages (tenant_id, type, name, lower_name, created_unix, created_via)
+		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(tenant_id, type, lower_name) DO NOTHING`,
-		tenantID, string(t), displayName, lookupName, now)
+		tenantID, string(t), displayName, lookupName, now, string(createdVia))
 	if err != nil {
 		return nil, fmt.Errorf("insert package: %w", err)
 	}
 	if id, _ := res.LastInsertId(); id > 0 {
-		return &Package{ID: id, TenantID: tenantID, Type: t, Name: displayName, LowerName: lookupName, CreatedUnix: now}, nil
+		return &Package{
+			ID: id, TenantID: tenantID, Type: t, Name: displayName,
+			LowerName: lookupName, CreatedUnix: now, CreatedVia: createdVia,
+		}, nil
 	}
 	return s.GetPackageByLookup(ctx, tenantID, t, lookupName)
 }
@@ -172,18 +230,19 @@ func (s *Store) GetPackage(ctx context.Context, tenantID int64, t Type, name str
 // (already lowercased / format-normalized).
 func (s *Store) GetPackageByLookup(ctx context.Context, tenantID int64, t Type, lookupName string) (*Package, error) {
 	row := s.DB.QueryRowContext(ctx,
-		`SELECT id, tenant_id, type, name, lower_name, created_unix
+		`SELECT id, tenant_id, type, name, lower_name, created_unix, created_via
 		   FROM packages WHERE tenant_id = ? AND type = ? AND lower_name = ?`,
 		tenantID, string(t), lookupName)
 	p := &Package{}
-	var typ string
-	if err := row.Scan(&p.ID, &p.TenantID, &typ, &p.Name, &p.LowerName, &p.CreatedUnix); err != nil {
+	var typ, via string
+	if err := row.Scan(&p.ID, &p.TenantID, &typ, &p.Name, &p.LowerName, &p.CreatedUnix, &via); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrPackageNotExist
 		}
 		return nil, err
 	}
 	p.Type = Type(typ)
+	p.CreatedVia = CreatedVia(via)
 	return p, nil
 }
 
@@ -198,19 +257,19 @@ func (s *Store) ListPackages(ctx context.Context, tenantID int64, t Type) ([]*Pa
 	switch {
 	case tenantID == 0 && t == "":
 		rows, err = s.DB.QueryContext(ctx,
-			`SELECT id, tenant_id, type, name, lower_name, created_unix
+			`SELECT id, tenant_id, type, name, lower_name, created_unix, created_via
 			   FROM packages ORDER BY tenant_id, lower_name ASC`)
 	case tenantID == 0:
 		rows, err = s.DB.QueryContext(ctx,
-			`SELECT id, tenant_id, type, name, lower_name, created_unix
+			`SELECT id, tenant_id, type, name, lower_name, created_unix, created_via
 			   FROM packages WHERE type = ? ORDER BY tenant_id, lower_name ASC`, string(t))
 	case t == "":
 		rows, err = s.DB.QueryContext(ctx,
-			`SELECT id, tenant_id, type, name, lower_name, created_unix
+			`SELECT id, tenant_id, type, name, lower_name, created_unix, created_via
 			   FROM packages WHERE tenant_id = ? ORDER BY lower_name ASC`, tenantID)
 	default:
 		rows, err = s.DB.QueryContext(ctx,
-			`SELECT id, tenant_id, type, name, lower_name, created_unix
+			`SELECT id, tenant_id, type, name, lower_name, created_unix, created_via
 			   FROM packages WHERE tenant_id = ? AND type = ? ORDER BY lower_name ASC`,
 			tenantID, string(t))
 	}
@@ -222,11 +281,12 @@ func (s *Store) ListPackages(ctx context.Context, tenantID int64, t Type) ([]*Pa
 	var out []*Package
 	for rows.Next() {
 		p := &Package{}
-		var typ string
-		if err := rows.Scan(&p.ID, &p.TenantID, &typ, &p.Name, &p.LowerName, &p.CreatedUnix); err != nil {
+		var typ, via string
+		if err := rows.Scan(&p.ID, &p.TenantID, &typ, &p.Name, &p.LowerName, &p.CreatedUnix, &via); err != nil {
 			return nil, err
 		}
 		p.Type = Type(typ)
+		p.CreatedVia = CreatedVia(via)
 		out = append(out, p)
 	}
 	return out, rows.Err()
@@ -729,6 +789,24 @@ func (s *Store) DeletePackage(ctx context.Context, packageID int64) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// SetPackageCreatedVia overrides the provenance marker on an existing
+// package row. Intended for the admin "change provenance" console flow
+// (and one-off ops repair). Returns ErrPackageNotExist if the row is
+// gone. Pass a CreatedVia constant; the function does NOT validate
+// because the schema's column type tolerates anything and operators
+// occasionally need to set values introduced later than the binary.
+func (s *Store) SetPackageCreatedVia(ctx context.Context, packageID int64, v CreatedVia) error {
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE packages SET created_via = ? WHERE id = ?`, string(v), packageID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrPackageNotExist
+	}
+	return nil
 }
 
 // ----- Properties -----

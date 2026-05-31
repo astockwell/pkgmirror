@@ -464,7 +464,7 @@ func GenerateKeyPair() (privatePEM, publicPEM string, err error) {
 // serialized externally by the handler via ExclusivePool; this
 // function does not lock.
 func GetOrCreateKeyPair(ctx context.Context, m *models.Store, tenantID int64) (privatePEM, publicPEM string, err error) {
-	pkg, err := m.GetOrCreatePackage(ctx, tenantID, models.TypeRPM, RepositoryPackage)
+	pkg, err := m.GetOrCreatePackage(ctx, tenantID, models.TypeRPM, RepositoryPackage, models.CreatedViaUploaded)
 	if err != nil {
 		return "", "", err
 	}
