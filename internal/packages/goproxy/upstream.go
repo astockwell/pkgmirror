@@ -626,8 +626,9 @@ func (h *Handler) pullThroughIngest(c *gin.Context, tenant *tenants.Tenant, modu
 		VersionProperties: map[string]string{
 			PropertyGoMod: string(goModBytes),
 		},
-		Filename: filename,
-		IsLead:   true,
+		Filename:   filename,
+		IsLead:     true,
+		CreatedVia: models.CreatedViaPullThrough,
 	}, buf)
 	if err != nil && !errors.Is(err, models.ErrDuplicatePackageFile) {
 		return fmt.Errorf("persist upstream zip: %w", err)

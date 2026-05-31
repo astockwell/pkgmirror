@@ -332,6 +332,28 @@ func (h *Handler) upload(c *gin.Context) {
 		return
 	}
 
+	// Provenance gate: refuse uploads to a Go module that pkgmirror
+	// originally ingested via pull-through. Without this, a malicious
+	// admin (or compromised CI token) could silently shadow an
+	// upstream module by uploading a 'newer' version under the same
+	// import path. The admin can either delete the package or flip
+	// its provenance to 'uploaded' via the console to take ownership.
+	// See plans/implemented/created-via-package-ownership.md.
+	//
+	// Note: Go's /upload endpoint is non-standard mirror tooling (the
+	// go proxy protocol has no upload verb), so this check primarily
+	// hardens against scripted attacks rather than `go publish`.
+	if existing, perr := h.Models.GetPackage(c.Request.Context(), tenant.ID, models.TypeGo, pkg.Name); perr == nil {
+		if existing.CreatedVia == models.CreatedViaPullThrough {
+			c.String(http.StatusConflict,
+				"module %q is currently mirrored from upstream; "+
+					"delete it via /console/tenants/%s/packages/go/%s "+
+					"first if you want to take ownership of this name",
+				existing.Name, tenant.Name, existing.LowerName)
+			return
+		}
+	}
+
 	_, _, _, err = h.Service.CreatePackageAndAddFile(c.Request.Context(), pkgsvc.CreationInfo{
 		TenantID:    tenant.ID,
 		PackageType: models.TypeGo,
@@ -340,8 +362,9 @@ func (h *Handler) upload(c *gin.Context) {
 		VersionProperties: map[string]string{
 			PropertyGoMod: pkg.GoMod,
 		},
-		Filename: filename,
-		IsLead:   true,
+		Filename:   filename,
+		IsLead:     true,
+		CreatedVia: models.CreatedViaUploaded,
 	}, buf)
 	if err != nil {
 		if errors.Is(err, models.ErrDuplicatePackageVersion) {

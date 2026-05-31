@@ -24,10 +24,11 @@ type packagesByTenantData struct {
 }
 
 type packageRow struct {
-	PackageID int64
-	Type      string
-	Name      string
-	Versions  int
+	PackageID  int64
+	Type       string
+	Name       string
+	Versions   int
+	Provenance string // human-readable form of created_via; "" suppresses badge
 }
 
 // packagesGlobalData drives pages/packages/global. Lists every package
@@ -44,6 +45,7 @@ type globalPackageRow struct {
 	Type       string
 	Name       string
 	Versions   int
+	Provenance string // human-readable form of created_via
 }
 
 // packagesGlobal is the sidebar Packages destination - a cross-tenant
@@ -76,6 +78,7 @@ func (c *Console) packagesGlobal(gc *gin.Context) {
 				Type:       string(p.Type),
 				Name:       p.Name,
 				Versions:   len(vers),
+				Provenance: provenanceLabel(p.CreatedVia),
 			})
 		}
 	}
@@ -104,10 +107,11 @@ func (c *Console) packagesByTenant(gc *gin.Context) {
 	for _, p := range pkgs {
 		vers, _ := c.models.ListVersions(ctx, p.ID)
 		rows = append(rows, packageRow{
-			PackageID: p.ID,
-			Type:      string(p.Type),
-			Name:      p.Name,
-			Versions:  len(vers),
+			PackageID:  p.ID,
+			Type:       string(p.Type),
+			Name:       p.Name,
+			Versions:   len(vers),
+			Provenance: provenanceLabel(p.CreatedVia),
 		})
 	}
 	c.Render(gc, "pages/packages/by-tenant", packagesByTenantData{

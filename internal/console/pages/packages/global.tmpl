@@ -12,6 +12,7 @@
         <th>Tenant</th>
         <th>Format</th>
         <th>Package</th>
+        <th>Provenance</th>
         <th>Versions</th>
         <th></th>
       </tr>
@@ -22,6 +23,7 @@
         <td><a href="/console/tenants/{{ .TenantName }}">{{ .TenantName }}</a></td>
         <td>{{ .Type }}</td>
         <td><a href="/console/tenants/{{ .TenantName }}/packages/{{ .Type }}/{{ .Name }}">{{ .Name }}</a></td>
+        <td><span class="muted">{{ default "-" .Provenance }}</span></td>
         <td>{{ .Versions }}</td>
         <td><a href="/console/tenants/{{ .TenantName }}/packages/{{ .Type }}/{{ .Name }}">View</a></td>
       </tr>

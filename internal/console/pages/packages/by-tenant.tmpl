@@ -11,6 +11,7 @@
       <tr>
         <th>Format</th>
         <th>Package</th>
+        <th>Provenance</th>
         <th>Versions</th>
         <th></th>
         {{ if .Body.CanManage }}<th></th>{{ end }}
@@ -21,6 +22,7 @@
       <tr>
         <td>{{ .Type }}</td>
         <td><a href="/console/tenants/{{ $.Body.Tenant.Name }}/packages/{{ .Type }}/{{ .Name }}">{{ .Name }}</a></td>
+        <td><span class="muted">{{ default "-" .Provenance }}</span></td>
         <td>{{ .Versions }}</td>
         <td><a href="/console/tenants/{{ $.Body.Tenant.Name }}/packages/{{ .Type }}/{{ .Name }}">View</a></td>
         {{ if $.Body.CanManage }}
