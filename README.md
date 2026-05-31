@@ -20,22 +20,37 @@ development; APIs surface-area-stable but no LTS guarantees yet.
 
 ### Package formats
 
-- [x] Go module proxy (`go`) — `GOPROXY` v1 protocol
-- [x] PyPI (`pypi`) — wheel + sdist upload, PEP 503 simple index, PEP 691 JSON
-- [x] npm (`npm`) — publish, packument, tarball download, dist-tags, scoped packages
-- [x] RubyGems (`rubygems`) — `gem push` / `gem install`, compact index, legacy specs.4.8.gz, yank
-- [x] Container / OCI (`container`) — OCI distribution v1.1: manifests, blobs (monolithic + chunked), tags, token-exchange auth dance
-- [x] Generic (`generic`) — PUT/GET/DELETE arbitrary blobs at `<name>/<version>/<filename>`
-- [x] Alpine (`alpine`) — `apk add` / `apk update`, signed APKINDEX.tar.gz, per-tenant RSA key
-- [x] Maven (`maven`) — `mvn deploy` / `mvn dependency:get`, POM metadata extraction, generated maven-metadata.xml, SHA-1/MD5/SHA-256/SHA-512 sidecar verification
-- [x] Debian (`debian`) — `apt update` / `apt-cache show`, on-demand Packages/Release indices, per-tenant OpenPGP signing (Release.gpg + InRelease)
-- [x] RPM (`rpm`) — `dnf install` / `dnf info`, on-demand primary/filelists/other + repomd.xml indices, per-tenant OpenPGP-signed `repomd.xml.asc`
-- [x] NuGet (`nuget`) — `dotnet add package` / `dotnet nuget push`, V3 service index + registration + package-base-address + search + publish, multipart + raw upload, `X-NuGet-ApiKey` auth
-- [x] CRAN (`cran`) — `install.packages()` for source + binary R packages, on-demand `PACKAGES` / `PACKAGES.gz` index per (platform, R version), DESCRIPTION parsing with license extraction
-- [ ] Cargo, Composer, Conan, Conda, Helm, Pub, Swift, ALT, Arch, Vagrant, Chef
+Each format has two independent capability axes:
+
+- **Registry / mirror** — accept uploads (where the protocol has them),
+  serve the format's index + artifacts to its real client (`pip`,
+  `npm`, `dnf`, etc.) under pkgmirror's own URL. This is what the
+  blackbox conformance suite exercises.
+- **JIT pull-through** — on a cold miss, fetch the artifact + metadata
+  from the canonical public registry, persist it, and serve it back
+  through the same response. Subsequent requests are cache hits.
+  Source of truth: [`internal/upstream/defaults.go`](internal/upstream/defaults.go).
+
+| Format | Registry / mirror | JIT pull-through | Notes |
+| --- | :---: | :---: | --- |
+| `go` (Go module proxy) | shipped | planned | `GOPROXY` v1 protocol |
+| `pypi` | shipped | **shipped** | wheel + sdist upload, PEP 503 simple index, PEP 691 JSON; pull-through against pypi.org with policy gating on cold path |
+| `npm` | shipped | planned | publish, packument, tarball download, dist-tags, scoped packages |
+| `rubygems` | shipped | planned | `gem push` / `gem install`, compact index, legacy `specs.4.8.gz`, yank |
+| `container` (OCI) | shipped | not planned | OCI distribution v1.1: manifests, blobs (monolithic + chunked), tags, token-exchange auth dance. Pull-through is out-of-scope — clients can already point directly at any OCI registry. |
+| `generic` | shipped | not planned | PUT/GET/DELETE arbitrary blobs at `<name>/<version>/<filename>`. No upstream by definition. |
+| `alpine` | shipped | planned | `apk add` / `apk update`, signed APKINDEX.tar.gz, per-tenant RSA key |
+| `maven` | shipped | planned | `mvn deploy` / `mvn dependency:get`, POM metadata extraction, generated `maven-metadata.xml`, SHA-1/MD5/SHA-256/SHA-512 sidecar verification |
+| `debian` | shipped | planned | `apt update` / `apt-cache show`, on-demand Packages/Release indices, per-tenant OpenPGP signing (Release.gpg + InRelease) |
+| `rpm` | shipped | planned | `dnf install` / `dnf info`, on-demand primary/filelists/other + repomd.xml indices, per-tenant OpenPGP-signed `repomd.xml.asc` |
+| `nuget` | shipped | planned | `dotnet add package` / `dotnet nuget push`, V3 service index + registration + package-base-address + search + publish, multipart + raw upload, `X-NuGet-ApiKey` auth |
+| `cran` | shipped | planned | `install.packages()` for source + binary R packages, on-demand `PACKAGES` / `PACKAGES.gz` index per (platform, R version), DESCRIPTION parsing with license extraction |
+| Cargo, Composer, Conan, Conda, Helm, Pub, Swift, ALT, Arch, Vagrant, Chef | planned | planned | not yet implemented |
 
 Every format goes through the same ingest / storage / serve pipeline, so
-the supply-chain controls below apply uniformly across all of them.
+the supply-chain controls below apply uniformly across all of them — and
+once a format gains JIT pull-through, the same controls also gate the
+cold-cache path before bytes ever leave the upstream registry.
 
 ### Supply-chain controls
 
