@@ -25,6 +25,7 @@ import (
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
 	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
+	"github.com/astockwell/pkgmirror/internal/upstream"
 
 	"github.com/gin-gonic/gin"
 )
@@ -32,10 +33,11 @@ import (
 // Handler implements the HTTP endpoints of the Go module proxy protocol plus
 // a non-standard upload endpoint for populating the mirror.
 type Handler struct {
-	Service *pkgsvc.Service
-	Models  *models.Store
-	Tenants *tenants.Store
-	Engine  policy.Engine
+	Service  *pkgsvc.Service
+	Models   *models.Store
+	Tenants  *tenants.Store
+	Engine   policy.Engine
+	Upstream upstream.Fetcher // optional; nil disables pull-through
 }
 
 // NewHandler constructs a Handler. If eng is nil, the no-op engine
@@ -45,6 +47,13 @@ func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store, eng pol
 		eng = policy.NoopEngine{}
 	}
 	return &Handler{Service: svc, Models: m, Tenants: ts, Engine: eng}
+}
+
+// WithUpstream returns h with the pull-through fetcher attached. Use
+// at construction time. Nil-safe: passing nil leaves pull-through off.
+func (h *Handler) WithUpstream(f upstream.Fetcher) *Handler {
+	h.Upstream = f
+	return h
 }
 
 // Register attaches the Go proxy routes to the given group. The group is
@@ -132,6 +141,11 @@ func (h *Handler) proxy(c *gin.Context) {
 func (h *Handler) list(c *gin.Context, tenant *tenants.Tenant, module string) {
 	pkg, err := h.Models.GetPackage(c.Request.Context(), tenant.ID, models.TypeGo, module)
 	if err != nil {
+		if errors.Is(err, models.ErrPackageNotExist) && h.passthroughEnabled(c, tenant) {
+			if h.servePullThroughList(c, tenant, module) {
+				return
+			}
+		}
 		h.notFoundOrError(c, err)
 		return
 	}
@@ -151,6 +165,12 @@ func (h *Handler) list(c *gin.Context, tenant *tenants.Tenant, module string) {
 func (h *Handler) info(c *gin.Context, tenant *tenants.Tenant, module, version string) {
 	pkg, ver, err := h.resolve(c.Request.Context(), tenant.ID, module, version)
 	if err != nil {
+		if (errors.Is(err, models.ErrPackageNotExist) || errors.Is(err, models.ErrVersionNotExist)) &&
+			h.passthroughEnabled(c, tenant) {
+			if h.servePullThroughInfo(c, tenant, module, version) {
+				return
+			}
+		}
 		h.notFoundOrError(c, err)
 		return
 	}
@@ -169,6 +189,12 @@ func (h *Handler) info(c *gin.Context, tenant *tenants.Tenant, module, version s
 func (h *Handler) mod(c *gin.Context, tenant *tenants.Tenant, module, version string) {
 	pkg, ver, err := h.resolve(c.Request.Context(), tenant.ID, module, version)
 	if err != nil {
+		if (errors.Is(err, models.ErrPackageNotExist) || errors.Is(err, models.ErrVersionNotExist)) &&
+			h.passthroughEnabled(c, tenant) {
+			if h.servePullThroughMod(c, tenant, module, version) {
+				return
+			}
+		}
 		h.notFoundOrError(c, err)
 		return
 	}
@@ -191,6 +217,12 @@ func (h *Handler) mod(c *gin.Context, tenant *tenants.Tenant, module, version st
 func (h *Handler) zip(c *gin.Context, tenant *tenants.Tenant, module, version string) {
 	pkg, ver, err := h.resolve(c.Request.Context(), tenant.ID, module, version)
 	if err != nil {
+		if (errors.Is(err, models.ErrPackageNotExist) || errors.Is(err, models.ErrVersionNotExist)) &&
+			h.passthroughEnabled(c, tenant) {
+			if h.servePullThroughZip(c, tenant, module, version) {
+				return
+			}
+		}
 		h.notFoundOrError(c, err)
 		return
 	}
@@ -230,6 +262,11 @@ func (h *Handler) zip(c *gin.Context, tenant *tenants.Tenant, module, version st
 func (h *Handler) latest(c *gin.Context, tenant *tenants.Tenant, module string) {
 	pkg, err := h.Models.GetPackage(c.Request.Context(), tenant.ID, models.TypeGo, module)
 	if err != nil {
+		if errors.Is(err, models.ErrPackageNotExist) && h.passthroughEnabled(c, tenant) {
+			if h.servePullThroughLatest(c, tenant, module) {
+				return
+			}
+		}
 		h.notFoundOrError(c, err)
 		return
 	}
@@ -240,6 +277,11 @@ func (h *Handler) latest(c *gin.Context, tenant *tenants.Tenant, module string) 
 	}
 	visible := h.filterReadable(c, tenant, pkg, versions)
 	if len(visible) == 0 {
+		// Local has the package but everything we have is
+		// quarantined/denied; try upstream for a newer @latest.
+		if h.passthroughEnabled(c, tenant) && h.servePullThroughLatest(c, tenant, module) {
+			return
+		}
 		c.String(http.StatusNotFound, "no readable version")
 		return
 	}

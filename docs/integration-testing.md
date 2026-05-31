@@ -104,7 +104,8 @@ tests/integration/         # this suite (build tag: integration only)
                              cache_and_serve + polite User-Agent +
                              conservative rate cap
     preflight.go             RequireReachable: t.Skip on upstream down
-    pypi/canary_test.go      three install tests
+    pypi/canary_test.go      three install tests (pip / six / urllib3)
+    go/canary_test.go        three install tests (rsc.io/quote / google/uuid)
 ```
 
 Future per-format additions go under `tests/integration/<format>/`. Each

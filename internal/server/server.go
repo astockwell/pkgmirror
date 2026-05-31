@@ -90,7 +90,7 @@ func New(d Deps) (*gin.Engine, error) {
 	// All gated by tokenAuth. The :tenant path param is resolved inside
 	// each handler before applying RequireRead / RequireWrite.
 	apiBase := r.Group("/api/packages/:tenant", tokenAuth)
-	goproxy.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/go"))
+	goproxy.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).WithUpstream(d.Upstream).Register(apiBase.Group("/go"))
 	pypi.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).WithUpstream(d.Upstream).Register(apiBase.Group("/pypi"))
 	npm.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/npm"))
 	rubygems.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/rubygems"))

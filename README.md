@@ -33,7 +33,7 @@ Each format has two independent capability axes:
 
 | Format | Registry / mirror | JIT pull-through | Notes |
 | --- | :---: | :---: | --- |
-| `go` (Go module proxy) | shipped | planned | `GOPROXY` v1 protocol |
+| `go` (Go module proxy) | shipped | **shipped** | `GOPROXY` v1 protocol; pull-through against proxy.golang.org with policy gating on cold path. `.info` `Time` field populates `upstream_published_unix` inline (no second-hop). sumdb passthrough not yet implemented — leave `GOSUMDB=sum.golang.org` (its default). |
 | `pypi` | shipped | **shipped** | wheel + sdist upload, PEP 503 simple index, PEP 691 JSON; pull-through against pypi.org with policy gating on cold path |
 | `npm` | shipped | planned | publish, packument, tarball download, dist-tags, scoped packages |
 | `rubygems` | shipped | planned | `gem push` / `gem install`, compact index, legacy `specs.4.8.gz`, yank |

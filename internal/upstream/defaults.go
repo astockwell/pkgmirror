@@ -44,7 +44,7 @@ var defaultUpstreams = map[string]DefaultUpstream{
 	"go": {
 		URL:                  "https://proxy.golang.org",
 		Hosts:                []string{"proxy.golang.org", "sum.golang.org"},
-		PullThroughSupported: false, // PR J
+		PullThroughSupported: true, // PR J
 	},
 	"rubygems": {
 		URL:                  "https://rubygems.org",
