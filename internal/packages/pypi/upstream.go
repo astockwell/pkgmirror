@@ -2,17 +2,17 @@
 //
 // Wires the internal/upstream fetcher into the PyPI handler so:
 //
-//  - GET /simple/:name/  on a totally-unknown package fetches the
-//    PEP 691 JSON index from pypi.org, rewrites every file URL to
-//    point at our own /files/... endpoint, and serves it. Nothing is
-//    persisted yet.
+//   - GET /simple/:name/  on a totally-unknown package fetches the
+//     PEP 691 JSON index from pypi.org, rewrites every file URL to
+//     point at our own /files/... endpoint, and serves it. Nothing is
+//     persisted yet.
 //
-//  - GET /files/:name/:version/:filename  on a not-yet-local file
-//    re-fetches the PEP 691 JSON, finds the matching entry,
-//    verifies it advertises the expected filename, fetches the blob
-//    over the fetcher (size-capped, allowlist-gated, single-flighted),
-//    ingests it through the same code path twine upload would, then
-//    serves the now-local file.
+//   - GET /files/:name/:version/:filename  on a not-yet-local file
+//     re-fetches the PEP 691 JSON, finds the matching entry,
+//     verifies it advertises the expected filename, fetches the blob
+//     over the fetcher (size-capped, allowlist-gated, single-flighted),
+//     ingests it through the same code path twine upload would, then
+//     serves the now-local file.
 //
 // We deliberately do NOT merge a local-then-upstream view. If a tenant
 // has uploaded any version of a package privately, that package is
