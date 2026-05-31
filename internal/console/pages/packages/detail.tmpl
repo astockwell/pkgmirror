@@ -6,6 +6,15 @@
       Tenant <a href="/console/tenants/{{ .Body.Tenant.Name }}">{{ .Body.Tenant.Name }}</a>
       &middot; <a href="/console/tenants/{{ .Body.Tenant.Name }}/packages">All packages</a>
     </p>
+    {{ if .Body.CanManage }}
+    <form method="post"
+          action="/console/tenants/{{ .Body.Tenant.Name }}/packages/{{ .Body.Package.Type }}/{{ .Body.Package.Name }}/delete"
+          style="margin-top:8px;display:inline">
+      {{ .Base.CSRFField }}
+      <button type="submit" class="btn btn-ghost btn-sm"
+              onclick="return confirm('Permanently delete {{ .Body.Package.Type }}/{{ .Body.Package.Name }} and all {{ len .Body.Versions }} version(s) from {{ .Body.Tenant.Name }}? This cannot be undone.')">Delete entire package</button>
+    </form>
+    {{ end }}
   </header>
 
   {{ if .Body.Versions }}
@@ -16,6 +25,7 @@
         <th>License</th>
         <th>Created</th>
         <th>Status</th>
+        {{ if .Body.CanManage }}<th></th>{{ end }}
       </tr>
     </thead>
     <tbody>
@@ -37,6 +47,17 @@
             <span style="color:var(--success)">live</span>
           {{ end }}
         </td>
+        {{ if $.Body.CanManage }}
+        <td>
+          <form method="post"
+                action="/console/tenants/{{ $.Body.Tenant.Name }}/packages/{{ $.Body.Package.Type }}/{{ $.Body.Package.Name }}/versions/{{ .VersionID }}/delete"
+                style="display:inline">
+            {{ $.Base.CSRFField }}
+            <button type="submit" class="btn btn-ghost btn-sm"
+                    onclick="return confirm('Permanently delete version {{ .Version }} of {{ $.Body.Package.Type }}/{{ $.Body.Package.Name }}? This cannot be undone.')">Delete</button>
+          </form>
+        </td>
+        {{ end }}
       </tr>
       {{ end }}
     </tbody>

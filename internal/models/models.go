@@ -601,11 +601,94 @@ func (s *Store) DeleteFile(ctx context.Context, fileID int64) error {
 }
 
 // DeleteVersion removes a version row by id; ON DELETE CASCADE on the
-// package_files FK drops all file rows attached to it. Missing rows are
-// not an error.
+// package_files FK drops all file rows attached to it. Properties
+// attached to the version (PropertyRefVersion) and to any of its
+// files (PropertyRefFile) are also cleaned up - they're not protected
+// by an FK and would otherwise leak.
+//
+// Missing rows are not an error.
+//
+// Blobs themselves are NOT deleted - they're content-addressed and may
+// still be referenced by other versions; a future orphan-GC pass
+// collects unreferenced ones.
 func (s *Store) DeleteVersion(ctx context.Context, versionID int64) error {
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM package_versions WHERE id = ?`, versionID)
-	return err
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Clean up properties hanging off the version's files (no FK).
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM package_properties
+		 WHERE ref_type = ?
+		   AND ref_id IN (SELECT id FROM package_files WHERE version_id = ?)`,
+		int(PropertyRefFile), versionID); err != nil {
+		return err
+	}
+	// Clean up properties hanging off the version itself.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM package_properties WHERE ref_type = ? AND ref_id = ?`,
+		int(PropertyRefVersion), versionID); err != nil {
+		return err
+	}
+	// Drop the version row; ON DELETE CASCADE drops file rows.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM package_versions WHERE id = ?`, versionID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DeletePackage removes a package and everything attached to it: all
+// versions (CASCADE), all files (CASCADE from versions), plus every
+// property attached to the package, its versions, and its files
+// (properties aren't FK'd so they need explicit cleanup).
+//
+// Blobs themselves are NOT deleted - same content-addressed reasoning
+// as DeleteVersion.
+//
+// Missing rows are not an error.
+func (s *Store) DeletePackage(ctx context.Context, packageID int64) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Properties on files belonging to any version of this package.
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM package_properties
+		 WHERE ref_type = ?
+		   AND ref_id IN (
+		       SELECT pf.id
+		         FROM package_files pf
+		         JOIN package_versions pv ON pv.id = pf.version_id
+		        WHERE pv.package_id = ?)`,
+		int(PropertyRefFile), packageID); err != nil {
+		return err
+	}
+	// Properties on versions of this package.
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM package_properties
+		 WHERE ref_type = ?
+		   AND ref_id IN (SELECT id FROM package_versions WHERE package_id = ?)`,
+		int(PropertyRefVersion), packageID); err != nil {
+		return err
+	}
+	// Properties on the package itself.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM package_properties WHERE ref_type = ? AND ref_id = ?`,
+		int(PropertyRefPackage), packageID); err != nil {
+		return err
+	}
+	// Drop the package; ON DELETE CASCADE drops versions; ON DELETE
+	// CASCADE on package_files FK drops files.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM packages WHERE id = ?`, packageID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ----- Properties -----

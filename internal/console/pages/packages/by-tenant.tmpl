@@ -13,6 +13,7 @@
         <th>Package</th>
         <th>Versions</th>
         <th></th>
+        {{ if .Body.CanManage }}<th></th>{{ end }}
       </tr>
     </thead>
     <tbody>
@@ -22,6 +23,17 @@
         <td><a href="/console/tenants/{{ $.Body.Tenant.Name }}/packages/{{ .Type }}/{{ .Name }}">{{ .Name }}</a></td>
         <td>{{ .Versions }}</td>
         <td><a href="/console/tenants/{{ $.Body.Tenant.Name }}/packages/{{ .Type }}/{{ .Name }}">View</a></td>
+        {{ if $.Body.CanManage }}
+        <td>
+          <form method="post"
+                action="/console/tenants/{{ $.Body.Tenant.Name }}/packages/{{ .Type }}/{{ .Name }}/delete"
+                style="display:inline">
+            {{ $.Base.CSRFField }}
+            <button type="submit" class="btn btn-ghost btn-sm"
+                    onclick="return confirm('Permanently delete {{ .Type }}/{{ .Name }} and all {{ .Versions }} version(s) from {{ $.Body.Tenant.Name }}? This cannot be undone.')">Delete</button>
+          </form>
+        </td>
+        {{ end }}
       </tr>
       {{ end }}
     </tbody>

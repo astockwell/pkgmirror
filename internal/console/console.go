@@ -204,6 +204,13 @@ func (c *Console) Register(r *gin.Engine) error {
 	adminOnly.POST("/tenants/:name/members", c.tenantMemberAdd)
 	adminOnly.POST("/tenants/:name/members/:user_id/delete", c.tenantMemberRemove)
 
+	// Destructive package + version delete (system admin only). POST
+	// with CSRF; the templates wrap the trigger in a JS confirm()
+	// prompt. Blobs themselves are kept (content-addressed); GC is a
+	// future pass.
+	adminOnly.POST("/tenants/:name/packages/:type/:pkgname/delete", c.packageDelete)
+	adminOnly.POST("/tenants/:name/packages/:type/:pkgname/versions/:version_id/delete", c.versionDelete)
+
 	// Upstream pull-through (system admin only; the host allowlist is
 	// NOT editable here on purpose - see plans/upstream-pull-through.md
 	// S2 and S5). Only mounted when an UpstreamConfigStore was supplied.

@@ -18,8 +18,9 @@ import (
 
 // packagesByTenantData drives pages/packages/by-tenant.
 type packagesByTenantData struct {
-	Tenant   *tenants.Tenant
-	Packages []packageRow
+	Tenant    *tenants.Tenant
+	Packages  []packageRow
+	CanManage bool // system admin -> render delete buttons
 }
 
 type packageRow struct {
@@ -59,14 +60,16 @@ func (c *Console) packagesByTenant(gc *gin.Context) {
 	}
 	c.Render(gc, "pages/packages/by-tenant", packagesByTenantData{
 		Tenant: t, Packages: rows,
+		CanManage: id.IsSystemAdmin(),
 	})
 }
 
 // packageDetailData drives pages/packages/detail.
 type packageDetailData struct {
-	Tenant   *tenants.Tenant
-	Package  *models.Package
-	Versions []versionRow
+	Tenant    *tenants.Tenant
+	Package   *models.Package
+	Versions  []versionRow
+	CanManage bool // system admin -> render delete buttons
 }
 
 type versionRow struct {
@@ -129,6 +132,7 @@ func (c *Console) packageDetail(gc *gin.Context) {
 	}
 	c.Render(gc, "pages/packages/detail", packageDetailData{
 		Tenant: t, Package: pkg, Versions: rows,
+		CanManage: id.IsSystemAdmin(),
 	})
 }
 
@@ -246,4 +250,156 @@ func (c *Console) auditQuarantine(gc *gin.Context, id *auth.Identity, action str
 		ev.UserID = id.User.ID
 	}
 	c.audit.Log(ev)
+}
+
+// ---- destructive: delete package + delete version ----
+//
+// Both are system-admin only and POST-only with CSRF; the templates
+// wrap the buttons in a JS confirm() prompt that names the target.
+// Blobs themselves are NOT removed - they're content-addressed; an
+// orphan GC pass collects unreferenced blobs (out of scope for now).
+
+// packageDelete drops the entire package + every version + every file
+// row. Properties hanging off any of those are cleaned up too (see
+// models.DeletePackage). Audit row emitted before mutation so an op
+// failure still leaves a forensic trail.
+func (c *Console) packageDelete(gc *gin.Context) {
+	ctx := gc.Request.Context()
+	id := auth.FromContext(gc)
+
+	t, ok := c.resolveTenantFromPath(gc)
+	if !ok {
+		return
+	}
+	pkgType := gc.Param("type")
+	pkgName := gc.Param("pkgname")
+	if pkgType == "" || pkgName == "" {
+		c.RenderNotFound(gc, "package not specified")
+		return
+	}
+
+	pkg, err := c.models.GetPackage(ctx, t.ID, models.Type(pkgType), pkgName)
+	if err != nil {
+		if errors.Is(err, models.ErrPackageNotExist) {
+			c.RenderNotFound(gc, "package %s/%s not found in tenant %s", pkgType, pkgName, t.Name)
+			return
+		}
+		c.RenderError(gc, "look up package", err)
+		return
+	}
+	// Count versions for the audit row + flash message before we drop.
+	vers, _ := c.models.ListVersions(ctx, pkg.ID)
+
+	if err := c.models.DeletePackage(ctx, pkg.ID); err != nil {
+		c.RenderError(gc, "delete package", err)
+		return
+	}
+	c.auditPackage(gc, id, t.ID, "tenants.package.delete", map[string]any{
+		"package_id":    pkg.ID,
+		"package_type":  string(pkg.Type),
+		"package_name":  pkg.Name,
+		"version_count": len(vers),
+	})
+	middleware.AddFlash(gc, middleware.FlashSuccess,
+		fmt.Sprintf("Deleted package %s/%s (%d version%s).", pkg.Type, pkg.Name, len(vers), plural(len(vers))))
+	gc.Redirect(http.StatusSeeOther,
+		"/console/tenants/"+t.Name+"/packages")
+}
+
+// versionDelete drops a single version from a package; the package row
+// itself stays. Version's files (CASCADE) and any properties on the
+// version + its files (transactional cleanup in models.DeleteVersion)
+// go too. Path param :version_id must belong to the named package -
+// we enforce that to stop an admin in tenant A from deleting a version
+// belonging to tenant B by guessing IDs.
+func (c *Console) versionDelete(gc *gin.Context) {
+	ctx := gc.Request.Context()
+	id := auth.FromContext(gc)
+
+	t, ok := c.resolveTenantFromPath(gc)
+	if !ok {
+		return
+	}
+	pkgType := gc.Param("type")
+	pkgName := gc.Param("pkgname")
+	versionID, err := strconv.ParseInt(gc.Param("version_id"), 10, 64)
+	if err != nil || versionID <= 0 {
+		c.RenderNotFound(gc, "version not specified")
+		return
+	}
+
+	pkg, err := c.models.GetPackage(ctx, t.ID, models.Type(pkgType), pkgName)
+	if err != nil {
+		if errors.Is(err, models.ErrPackageNotExist) {
+			c.RenderNotFound(gc, "package %s/%s not found in tenant %s", pkgType, pkgName, t.Name)
+			return
+		}
+		c.RenderError(gc, "look up package", err)
+		return
+	}
+
+	// Belt-and-braces: the version row must belong to this package.
+	// Walking the list is fine here - admin pages are not hot-path
+	// and packages with thousands of versions are rare.
+	vers, err := c.models.ListVersions(ctx, pkg.ID)
+	if err != nil {
+		c.RenderError(gc, "list versions", err)
+		return
+	}
+	var match *models.Version
+	for _, v := range vers {
+		if v.ID == versionID {
+			match = v
+			break
+		}
+	}
+	if match == nil {
+		c.RenderNotFound(gc, "version #%d does not belong to package %s/%s", versionID, pkgType, pkgName)
+		return
+	}
+
+	if err := c.models.DeleteVersion(ctx, versionID); err != nil {
+		c.RenderError(gc, "delete version", err)
+		return
+	}
+	c.auditPackage(gc, id, t.ID, "tenants.package.version.delete", map[string]any{
+		"package_id":   pkg.ID,
+		"package_type": string(pkg.Type),
+		"package_name": pkg.Name,
+		"version_id":   versionID,
+		"version":      match.Version,
+	})
+	middleware.AddFlash(gc, middleware.FlashSuccess,
+		fmt.Sprintf("Deleted version %s of %s/%s.", match.Version, pkg.Type, pkg.Name))
+	gc.Redirect(http.StatusSeeOther,
+		"/console/tenants/"+t.Name+"/packages/"+pkgType+"/"+pkgName)
+}
+
+// auditPackage records a package- or version-scoped admin action.
+// Shape mirrors auditTenant; kept separate so the action vocabulary
+// stays grep-friendly when reviewing the audit log.
+func (c *Console) auditPackage(gc *gin.Context, id *auth.Identity, tenantID int64, action string, extra map[string]any) {
+	if c.audit == nil {
+		return
+	}
+	ev := audit.Event{
+		Action:     action,
+		ActorKind:  "session",
+		TenantID:   tenantID,
+		RequestID:  middleware.RequestIDFrom(gc),
+		RemoteAddr: middleware.ClientIPFor(gc.Request, c.cfg.TrustedProxies),
+		UserAgent:  gc.Request.UserAgent(),
+		Extra:      extra,
+	}
+	if id != nil && id.User != nil {
+		ev.UserID = id.User.ID
+	}
+	c.audit.Log(ev)
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
