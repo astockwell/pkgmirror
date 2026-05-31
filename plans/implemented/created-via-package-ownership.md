@@ -1,5 +1,45 @@
 # `packages.created_via` — first-touch ownership for tenant packages
 
+**Status:** shipped 2026-05-31 across 4 commits.
+
+- PR A (`919b2a0`): migration v6 + models layer + signature change.
+- PR B (`2d256b6`): PyPI handler wiring + 5 provenance tests.
+- PR C (`7e7b451`): console badge + admin flip form + 4 console tests.
+- PR D: docs/supply-chain.md + README + demo talking point.
+
+**One-line:** Add `packages.created_via TEXT` so the `/simple/<name>/`
+merge knows whether a package was tenant-uploaded (don't pull through)
+or first arrived via upstream (merge upstream into the local view).
+
+Post-implementation notes
+-------------------------
+
+- The plan recommended 4 PRs at ~1.75 days; actual was 4 commits in
+  one focused session. No surprises in the data model; the typosquat
+  + insider-shadow tests pass exactly as drafted in the plan's §6.
+- The 409 body text from the plan worked verbatim; tests assert on
+  the package name, "mirrored from upstream", and the console URL
+  fragment - which matches the plan's intent.
+- One minor deviation: the admin flip's confirm dialog uses two
+  distinct messages (uploaded→pull_through vs pull_through→uploaded)
+  to spell out the security implication in BOTH directions, rather
+  than one generic confirm. Plan §5.3 anticipated this as an
+  engineer-side decision.
+- Cross-format wiring still pending. The column is universal but only
+  the PyPI handler consumes it today. npm/rubygems/etc. handlers will
+  set CreatedViaUploaded on upload + CreatedViaPullThrough on
+  pull-through ingest as their pull-through PRs land. See the plan's
+  §5.2 for the per-format pattern.
+- The Go pull-through (which shipped before this plan) currently has
+  no upload endpoint of its own, so the row provenance is always
+  `pull_through` for go modules - the gate behaves correctly but the
+  insider-upload defense isn't applicable. Follow-up if the go module
+  upload endpoint grows.
+
+--- ORIGINAL PLAN BELOW ---
+
+# `packages.created_via` — first-touch ownership for tenant packages
+
 **Status:** plan / ready for review. Not yet implemented.
 
 **One-line:** Add `packages.created_via TEXT` so the `/simple/<name>/`

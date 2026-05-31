@@ -60,6 +60,7 @@ Full details + operator runbook in [docs/supply-chain.md](docs/supply-chain.md).
 | --- | --- | --- |
 | **Cooldown** | Hide newly-published versions until they've been in the mirror for N days. Shrinks the blast radius of a compromised upstream release before anyone in your org installs it. | shipped |
 | **License allowlist** | Refuse, quarantine, or warn when an artifact's SPDX license isn't on your allowed list. (PyPI today; per-format extractors land alongside each format.) | shipped |
+| **Package provenance** | Per-package `uploaded` / `pull_through` marker. Tenant-uploaded names are sealed from upstream merge (typosquat-safe); uploads to pull-through-owned names are refused with 409 (insider-shadow defense). Admin can flip via the console. | shipped (PyPI today; per-format wiring lands alongside each pull-through adapter) |
 | **Quarantine** | "Stored but hidden" status. Versions flagged by policy are kept on disk for forensics but disappear from index listings and 403 on read until an admin promotes or rejects them. | shipped |
 | **Audit log** | Every ingest, every non-Allow decision, and (per-tenant opt-in) every read recorded with actor, request ID, decision, and reason. Queryable via `/admin/audit`. | shipped |
 | **Multi-tenancy** | Each tenant is an isolation boundary for packages, tokens, and policy. Public / private visibility controls anonymous reads per tenant. | shipped |

@@ -11,9 +11,7 @@ documentation of features that **already exist**.
 
 ## In-flight
 
-| Plan | Status |
-| --- | --- |
-| [created-via-package-ownership.md](created-via-package-ownership.md) | Ready for review. Adds `packages.created_via` so the `/simple/` merge knows whether a package is tenant-uploaded (don't reach upstream) or pull-through-ingested (merge upstream). Closes the typosquat hole the recent merge opened. |
+_(none right now — submit one as `plans/<name>.md`)_
 
 ## Brainstorms / backlogs
 
@@ -30,3 +28,4 @@ scoped.
 | Plan | Shipped | Post-facto notes |
 | --- | --- | --- |
 | [supply-chain-policy-engine.md](implemented/supply-chain-policy-engine.md) | 2026-05-27 | Engine + audit log + cooldown + license allowlist + admin endpoints. 8 step-aligned commits. See the file's "Post-implementation notes" section. |
+| [created-via-package-ownership.md](implemented/created-via-package-ownership.md) | 2026-05-31 | `packages.created_via` per-package marker; PyPI handler gates merge + 409s upload-against-pull-through; console badge + admin flip form; 14 new tests across 4 PRs. |

@@ -17,6 +17,7 @@ For the broader brainstorm of future controls see
 | --- | --- | --- |
 | **Cooldown** | Hide a version until it has been in the mirror for at least N days. Reduces blast radius of compromised upstream releases. | shipped |
 | **License allowlist** | Refuse (or quarantine / warn) when an artifact's SPDX license is not in the allowed set. | shipped (PyPI today; per-format extractor needed for go/npm/etc.) |
+| **Package provenance** | Per-package marker (`uploaded` vs `pull_through`) controlling whether the `/simple/` (or equivalent) index merges upstream. Tenant-uploaded packages are sealed from upstream merge (typosquat defense); pull-through packages stay merged. Uploads to a pull-through-owned name are refused with 409 (insider-shadow defense). | shipped (PyPI today; per-format wiring lands alongside each pull-through adapter) |
 | **Audit log** | Every ingest, every non-Allow decision, and optionally every read recorded with actor, request id, decision, reason. | shipped |
 | **Quarantine** | "Stored but hidden" status for a version. Admin can promote or reject. | shipped |
 | Per-version blocklist | Deny by exact (name, version). | deferred — architecture supports it; not implemented |
@@ -316,6 +317,63 @@ config:
 This gives the org 7 days globally and `prod` 21 days specifically.
 A team can add a package-scoped override to relax it for known-trusted
 deps.
+
+---
+
+## Package provenance (`packages.created_via`)
+
+**Why it exists:** the `/simple/<name>/` (PyPI) and equivalent
+per-format index handlers merge tenant-local + upstream views so a
+fresh pull-through version shows up the moment a cooldown rule releases
+it. Without a marker, that merge opens two attack surfaces:
+
+1. **Typosquat.** A tenant uploads `acme-internal-lib v1.0.0`. An
+   attacker registers `acme-internal-lib v0.9.0` on the public registry.
+   `pip install acme-internal-lib<1.0` against pkgmirror would merge
+   the attacker's upstream and resolve to it.
+2. **Insider shadow.** Pull-through has been serving `requests v2.32.x`.
+   An insider uploads `requests v999.99.99` to the tenant. uv installs
+   the "newer" local version on the next sync.
+
+**How it works:** every `packages` row carries a `created_via` value
+set on first INSERT, sticky thereafter:
+
+| Value | Set when | `/simple/` behavior | Upload behavior |
+| --- | --- | --- | --- |
+| `uploaded` | A human (or CI publish step) was first to put this package into pkgmirror. | Local-only; upstream is **never** contacted for this name. | Accepted. |
+| `pull_through` | pkgmirror first ingested this package via a cold pull-through miss. | Local + upstream merge (the design from `plans/upstream-pull-through.md`). | **Refused with 409** — admin must delete the package or flip provenance to `uploaded` first. |
+
+The `uploaded` row is *strict*: once the tenant owns the name, no
+upstream version with the same name can ever shadow it. The
+`pull_through` row is *exclusive*: nobody can silently upload over a
+mirrored package; the insider-shadow path becomes a loud 409 + audit
+row instead.
+
+**Admin override:** the package detail page in the web console shows
+the current provenance as a badge and offers a "Flip to ..." form
+(system-admin only). The confirm dialog spells out exactly which
+behavior changes. Every flip writes a
+`tenants.package.set_provenance` audit row with old + new values; a
+failed upload-against-pull_through writes
+`tenants.package.upload_refused_provenance` so the security team can
+spot probes.
+
+**Bulk-flip after upgrade:** the migration that added
+`created_via` defaults every existing row to `'uploaded'` (the safer
+value). If a deployment is purely pull-through and the operator wants
+the merge behavior to keep working for all pre-migration packages,
+the one-liner is:
+
+```sql
+UPDATE packages SET created_via = 'pull_through' WHERE created_via = 'uploaded';
+```
+
+Review before running. The conservative default is correct for a
+deployment that has even a single tenant-uploaded private package;
+relaxing it bulk-style is an operator-side risk acceptance.
+
+For the security rationale + design alternatives considered, see
+[plans/created-via-package-ownership.md](../plans/created-via-package-ownership.md).
 
 ---
 
