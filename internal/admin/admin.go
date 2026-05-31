@@ -47,6 +47,9 @@ func (h *Handler) Register(r *gin.Engine, middleware ...gin.HandlerFunc) {
 
 	g.GET("/audit", h.listAudit)
 
+	g.GET("/packages", h.listPackages)
+	g.POST("/packages/:id/provenance", h.setPackageProvenance)
+
 	g.GET("/quarantine", h.listQuarantine)
 	g.POST("/quarantine/:version_id/promote", h.promoteQuarantine)
 	g.POST("/quarantine/:version_id/reject", h.rejectQuarantine)
@@ -248,6 +251,167 @@ func (h *Handler) listAudit(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"events": events})
+}
+
+// --- packages ---
+
+// packageDTO is the shape returned by /admin/packages (list +
+// future single-package GET). Fields are kept JSON-flat so a
+// caller can pipe `| jq` against it without nested digging.
+type packageDTO struct {
+	ID          int64  `json:"id"`
+	TenantID    int64  `json:"tenant_id"`
+	Type        string `json:"type"`
+	Name        string `json:"name"`
+	LowerName   string `json:"lower_name"`
+	CreatedUnix int64  `json:"created_unix"`
+	CreatedVia  string `json:"created_via"`
+	Versions    int    `json:"versions"`
+}
+
+// listPackages returns packages across all tenants, with optional
+// filters. Mirrors the /admin/audit query-param style (no nested
+// path variables; everything via ?key=value).
+//
+//	?tenant_id=N            filter to a single tenant
+//	?format=pypi            filter to a single format
+//	?provenance=uploaded    filter to a single created_via value
+//	?limit=N&offset=N       pagination (default limit=100, offset=0)
+//
+// Returns {"packages":[...],"next_offset":N|null} where next_offset
+// is the value to pass as ?offset= for the next page (null when the
+// current page is the last).
+func (h *Handler) listPackages(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	var tenantID int64
+	if v := c.Query("tenant_id"); v != "" {
+		tenantID, _ = strconv.ParseInt(v, 10, 64)
+	}
+	format := models.Type(c.Query("format"))
+	provenance := c.Query("provenance")
+	limit := 100
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	offset := 0
+	if v := c.Query("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	// ListPackages doesn't support provenance filtering or pagination
+	// natively today. We fetch + filter + paginate in-process. For
+	// instance scales of "thousands of packages" this is fine; if we
+	// ever push past 10k packages per tenant a model-layer query with
+	// pagination becomes worth writing.
+	all, err := h.Models.ListPackages(ctx, tenantID, format)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "%v", err)
+		return
+	}
+	filtered := all[:0:0]
+	for _, p := range all {
+		if provenance != "" && string(p.CreatedVia) != provenance {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+
+	// Page slice.
+	end := offset + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	page := filtered[min(offset, len(filtered)):end]
+
+	out := make([]packageDTO, 0, len(page))
+	for _, p := range page {
+		vers, _ := h.Models.ListVersions(ctx, p.ID)
+		out = append(out, packageDTO{
+			ID:          p.ID,
+			TenantID:    p.TenantID,
+			Type:        string(p.Type),
+			Name:        p.Name,
+			LowerName:   p.LowerName,
+			CreatedUnix: p.CreatedUnix,
+			CreatedVia:  string(p.CreatedVia),
+			Versions:    len(vers),
+		})
+	}
+
+	var nextOffset any
+	if end < len(filtered) {
+		nextOffset = end
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"packages":    out,
+		"total":       len(filtered),
+		"next_offset": nextOffset,
+	})
+}
+
+// setPackageProvenance is the API counterpart to the console's
+// "Flip to ..." form. Body: {"created_via": "uploaded"|"pull_through"}.
+// Same audit shape as the console handler but with source=admin_api
+// so the audit log can distinguish API mutations from console
+// mutations.
+func (h *Handler) setPackageProvenance(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.String(http.StatusBadRequest, "id: %v", err)
+		return
+	}
+	var req struct {
+		CreatedVia string `json:"created_via"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.String(http.StatusBadRequest, "bad json: %v", err)
+		return
+	}
+	newVia := models.CreatedVia(req.CreatedVia)
+	if !newVia.Valid() {
+		c.String(http.StatusBadRequest,
+			"created_via %q is not a recognized value (want 'uploaded' or 'pull_through')",
+			req.CreatedVia)
+		return
+	}
+
+	pkg, err := h.Models.GetPackageByID(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, models.ErrPackageNotExist) {
+			c.String(http.StatusNotFound, "no such package")
+			return
+		}
+		c.String(http.StatusInternalServerError, "%v", err)
+		return
+	}
+	old := pkg.CreatedVia
+
+	if err := h.Models.SetPackageCreatedVia(c.Request.Context(), pkg.ID, newVia); err != nil {
+		c.String(http.StatusInternalServerError, "%v", err)
+		return
+	}
+	h.emit(c, audit.Event{
+		Action:   "tenants.package.set_provenance",
+		TenantID: pkg.TenantID,
+		Format:   string(pkg.Type),
+		Package:  pkg.Name,
+		Reason:   "admin API flip",
+		Extra: map[string]any{
+			"package_id": pkg.ID,
+			"old":        string(old),
+			"new":        string(newVia),
+			"source":     "admin_api",
+		},
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"id":          pkg.ID,
+		"created_via": string(newVia),
+	})
 }
 
 // --- quarantine ---

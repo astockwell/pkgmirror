@@ -11,6 +11,7 @@ import (
 	"github.com/astockwell/pkgmirror/internal/audit"
 	"github.com/astockwell/pkgmirror/internal/auth"
 	"github.com/astockwell/pkgmirror/internal/console/middleware"
+	"github.com/astockwell/pkgmirror/internal/models"
 	"github.com/astockwell/pkgmirror/internal/tenants"
 	"github.com/astockwell/pkgmirror/internal/users"
 
@@ -70,7 +71,17 @@ type tenantDetailData struct {
 	Tenant       *tenants.Tenant
 	Members      []memberRow
 	PackageCount int
-	CanManage    bool // whether to render member-management forms
+
+	// PackagesUploaded + PackagesPullThrough split PackageCount by
+	// the packages.created_via column. Both sum to PackageCount when
+	// no packages predate migration v6's safer 'uploaded' default; in
+	// older deployments they sum to PackageCount minus a tiny tail
+	// of unrecognized values that the helper round-trips as the raw
+	// string.
+	PackagesUploaded    int
+	PackagesPullThrough int
+
+	CanManage bool // whether to render member-management forms
 }
 
 type memberRow struct {
@@ -102,6 +113,20 @@ func (c *Console) tenantDetail(gc *gin.Context) {
 	}
 	count, _ := c.models.CountPackages(ctx, t.ID)
 
+	// Provenance split for the count summary. ListPackages already
+	// SELECTs created_via; this avoids a separate GROUP BY query.
+	var uploadedN, pullThroughN int
+	if pkgs, perr := c.models.ListPackages(ctx, t.ID, ""); perr == nil {
+		for _, p := range pkgs {
+			switch p.CreatedVia {
+			case models.CreatedViaUploaded:
+				uploadedN++
+			case models.CreatedViaPullThrough:
+				pullThroughN++
+			}
+		}
+	}
+
 	rows := make([]memberRow, 0, len(members))
 	for _, m := range members {
 		email := ""
@@ -119,10 +144,12 @@ func (c *Console) tenantDetail(gc *gin.Context) {
 	}
 
 	c.Render(gc, "pages/tenants/detail", tenantDetailData{
-		Tenant:       t,
-		Members:      rows,
-		PackageCount: count,
-		CanManage:    id.IsSystemAdmin(),
+		Tenant:              t,
+		Members:             rows,
+		PackageCount:        count,
+		PackagesUploaded:    uploadedN,
+		PackagesPullThrough: pullThroughN,
+		CanManage:           id.IsSystemAdmin(),
 	})
 }
 

@@ -226,6 +226,27 @@ func (s *Store) GetPackage(ctx context.Context, tenantID int64, t Type, name str
 	return s.GetPackageByLookup(ctx, tenantID, t, strings.ToLower(name))
 }
 
+// GetPackageByID looks up a package by its primary key. Used by
+// admin tooling where the (tenant, type, name) tuple isn't handy
+// (e.g. the admin HTTP API flips provenance by ID). Returns
+// ErrPackageNotExist when no row exists.
+func (s *Store) GetPackageByID(ctx context.Context, id int64) (*Package, error) {
+	row := s.DB.QueryRowContext(ctx,
+		`SELECT id, tenant_id, type, name, lower_name, created_unix, created_via
+		   FROM packages WHERE id = ?`, id)
+	p := &Package{}
+	var typ, via string
+	if err := row.Scan(&p.ID, &p.TenantID, &typ, &p.Name, &p.LowerName, &p.CreatedUnix, &via); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrPackageNotExist
+		}
+		return nil, err
+	}
+	p.Type = Type(typ)
+	p.CreatedVia = CreatedVia(via)
+	return p, nil
+}
+
 // GetPackageByLookup looks up a package by its canonical lookup key
 // (already lowercased / format-normalized).
 func (s *Store) GetPackageByLookup(ctx context.Context, tenantID int64, t Type, lookupName string) (*Package, error) {

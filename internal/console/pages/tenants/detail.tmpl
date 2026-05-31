@@ -5,7 +5,12 @@
     <p class="muted">
       Tenant #{{ .Body.Tenant.ID }} &middot;
       {{ if eq .Body.Tenant.Visibility 1 }}<span class="user-badge" style="background:var(--success)">public</span>{{ else }}<span class="muted">private</span>{{ end }}
-      &middot; {{ .Body.PackageCount }} packages
+      &middot;
+      <a href="/console/tenants/{{ .Body.Tenant.Name }}/packages">{{ .Body.PackageCount }} packages</a>
+      {{ if .Body.PackageCount }}
+      (<a href="/console/tenants/{{ .Body.Tenant.Name }}/packages?provenance=uploaded">{{ .Body.PackagesUploaded }} uploaded</a>,
+       <a href="/console/tenants/{{ .Body.Tenant.Name }}/packages?provenance=pull_through">{{ .Body.PackagesPullThrough }} mirrored</a>)
+      {{ end }}
     </p>
   </header>
 

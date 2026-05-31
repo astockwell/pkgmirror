@@ -21,6 +21,11 @@ type packagesByTenantData struct {
 	Tenant    *tenants.Tenant
 	Packages  []packageRow
 	CanManage bool // system admin -> render delete buttons
+
+	// ProvenanceFilter is the active ?provenance= query param value
+	// ("" / "uploaded" / "pull_through"); the template uses it to
+	// render the current select-option as selected.
+	ProvenanceFilter string
 }
 
 type packageRow struct {
@@ -37,7 +42,8 @@ type packageRow struct {
 // tenants). The sidebar Packages link routes here so users have a
 // useful landing page even before they've picked a tenant.
 type packagesGlobalData struct {
-	Rows []globalPackageRow
+	Rows             []globalPackageRow
+	ProvenanceFilter string // "" / "uploaded" / "pull_through"
 }
 
 type globalPackageRow struct {
@@ -55,6 +61,7 @@ type globalPackageRow struct {
 func (c *Console) packagesGlobal(gc *gin.Context) {
 	ctx := gc.Request.Context()
 	id := auth.FromContext(gc)
+	provFilter := gc.Query("provenance")
 
 	all, err := c.tenants.List(ctx)
 	if err != nil {
@@ -72,6 +79,9 @@ func (c *Console) packagesGlobal(gc *gin.Context) {
 			return
 		}
 		for _, p := range pkgs {
+			if provFilter != "" && string(p.CreatedVia) != provFilter {
+				continue
+			}
 			vers, _ := c.models.ListVersions(ctx, p.ID)
 			rows = append(rows, globalPackageRow{
 				TenantName: t.Name,
@@ -82,7 +92,10 @@ func (c *Console) packagesGlobal(gc *gin.Context) {
 			})
 		}
 	}
-	c.Render(gc, "pages/packages/global", packagesGlobalData{Rows: rows})
+	c.Render(gc, "pages/packages/global", packagesGlobalData{
+		Rows:             rows,
+		ProvenanceFilter: provFilter,
+	})
 }
 
 // packagesByTenant lists every package inside a tenant. Read-only.
@@ -103,8 +116,12 @@ func (c *Console) packagesByTenant(gc *gin.Context) {
 		c.RenderError(gc, "list packages", err)
 		return
 	}
+	provFilter := gc.Query("provenance")
 	rows := make([]packageRow, 0, len(pkgs))
 	for _, p := range pkgs {
+		if provFilter != "" && string(p.CreatedVia) != provFilter {
+			continue
+		}
 		vers, _ := c.models.ListVersions(ctx, p.ID)
 		rows = append(rows, packageRow{
 			PackageID:  p.ID,
@@ -116,7 +133,8 @@ func (c *Console) packagesByTenant(gc *gin.Context) {
 	}
 	c.Render(gc, "pages/packages/by-tenant", packagesByTenantData{
 		Tenant: t, Packages: rows,
-		CanManage: id.IsSystemAdmin(),
+		CanManage:        id.IsSystemAdmin(),
+		ProvenanceFilter: provFilter,
 	})
 }
 
@@ -450,6 +468,7 @@ func (c *Console) packageSetProvenance(gc *gin.Context) {
 		"package_name": pkg.Name,
 		"old":          string(old),
 		"new":          string(newVia),
+		"source":       "console",
 	})
 	middleware.AddFlash(gc, middleware.FlashSuccess,
 		fmt.Sprintf("Provenance for %s/%s set to %q.",

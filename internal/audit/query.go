@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -125,6 +126,16 @@ func ListEvents(ctx context.Context, db *sql.DB, q Query) ([]Event, error) {
 		ev.Filename = filename.String
 		ev.Decision = decision.String
 		ev.Reason = reason.String
+		if extra.Valid && extra.String != "" && extra.String != "{}" {
+			// Best-effort decode of the extra_json column back into the
+			// map[string]any Event.Extra exposes. A malformed extra
+			// blob shouldn't lose the rest of the row, so we ignore
+			// the decode error and just leave Extra nil in that case.
+			var m map[string]any
+			if err := json.Unmarshal([]byte(extra.String), &m); err == nil {
+				ev.Extra = m
+			}
+		}
 		out = append(out, ev)
 	}
 	return out, rows.Err()

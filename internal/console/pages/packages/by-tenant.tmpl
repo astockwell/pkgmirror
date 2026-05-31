@@ -5,6 +5,16 @@
     <p class="muted"><a href="/console/tenants/{{ .Body.Tenant.Name }}">&larr; Back to tenant</a></p>
   </header>
 
+  <form method="get" style="margin-bottom:12px">
+    <label for="provenance" style="margin-right:6px">Filter by provenance:</label>
+    <select id="provenance" name="provenance" onchange="this.form.submit()">
+      <option value=""             {{ if eq .Body.ProvenanceFilter ""             }}selected{{ end }}>All</option>
+      <option value="uploaded"     {{ if eq .Body.ProvenanceFilter "uploaded"     }}selected{{ end }}>uploaded</option>
+      <option value="pull_through" {{ if eq .Body.ProvenanceFilter "pull_through" }}selected{{ end }}>mirrored from upstream</option>
+    </select>
+    <noscript><button type="submit" class="btn btn-ghost btn-sm">Apply</button></noscript>
+  </form>
+
   {{ if .Body.Packages }}
   <table class="table">
     <thead>
