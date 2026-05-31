@@ -157,6 +157,10 @@ tag. Today (May 2026) those pins are:
   `python:3-slim`, etc.). When a future client release breaks our
   wire format, we find out from a green-on-pinned, red-on-latest
   signal.
+- The internet-connected integration suite (`tests/integration/`,
+  `.github/workflows/integration.yml`) already runs weekly against
+  the real public registries; see [integration-testing.md](integration-testing.md)
+  for what it covers and the etiquette policy for adding new canaries.
 - Dependabot / Renovate watching the pinned tags and opening PRs
   with version bumps. Renovate has good Docker tag support.
 

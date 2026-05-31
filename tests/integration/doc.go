@@ -20,7 +20,7 @@
 //     a "we cannot tell whether our code broke" signal should NOT
 //     wake anyone up
 //
-// Etiquette (see tests/integration/README.md):
+// Etiquette (see docs/integration-testing.md):
 //   - exercise only a tiny canary set of well-known stable packages
 //   - run weekly, not daily, against public registries
 //   - identify ourselves via User-Agent

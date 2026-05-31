@@ -8,7 +8,7 @@ name: Integration (real network)
 # or pull_request - this suite would (a) hit upstreams from every PR
 # and (b) gate merges on conditions outside the contributor's control.
 #
-# ETIQUETTE: see tests/integration/README.md. Short version:
+# ETIQUETTE: see docs/integration-testing.md. Short version:
 #   - tiny canary set of stable packages
 #   - distinctive User-Agent so registry operators can find us
 #   - skip (not fail) when upstream is unreachable
