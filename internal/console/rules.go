@@ -77,16 +77,45 @@ type ruleEditData struct {
 	ConfigJSON string
 	ExpiresAt  int64
 	Errors     map[string]string
+
+	// Tenants is rendered as a hint under the Tenant ID input so the
+	// admin doesn't have to grep the DB for the numeric ID. Empty when
+	// the tenant store lookup fails (degraded, not fatal).
+	Tenants []tenantHint
+}
+
+// tenantHint is the (id, name) pair rendered in the rule edit form.
+type tenantHint struct {
+	ID   int64
+	Name string
+}
+
+// listTenantHints loads every tenant for the edit form's helper line.
+// Errors are swallowed - the field is decorative.
+func (c *Console) listTenantHints(gc *gin.Context) []tenantHint {
+	all, err := c.tenants.List(gc.Request.Context())
+	if err != nil {
+		return nil
+	}
+	out := make([]tenantHint, 0, len(all))
+	for _, t := range all {
+		out = append(out, tenantHint{ID: t.ID, Name: t.Name})
+	}
+	return out
 }
 
 func (c *Console) ruleNew(gc *gin.Context) {
+	// Default config_json that actually works for the default kind
+	// (cooldown). Saves the admin from needing to know the JSON shape
+	// just to get past form validation on first save.
 	c.Render(gc, "pages/rules/edit", ruleEditData{
 		Priority:   100,
 		Enabled:    true,
 		Action:     "warn",
 		Kind:       "cooldown",
-		ConfigJSON: "{}",
+		ConfigJSON: `{"min_age_days": 14}`,
 		Errors:     map[string]string{},
+		Tenants:    c.listTenantHints(gc),
 	})
 }
 
@@ -106,7 +135,9 @@ func (c *Console) ruleEdit(gc *gin.Context) {
 		c.RenderError(gc, "look up rule", err)
 		return
 	}
-	c.Render(gc, "pages/rules/edit", ruleEditFromPolicy(r))
+	data := ruleEditFromPolicy(r)
+	data.Tenants = c.listTenantHints(gc)
+	c.Render(gc, "pages/rules/edit", data)
 }
 
 func ruleEditFromPolicy(r policy.Rule) ruleEditData {
@@ -157,6 +188,9 @@ func (c *Console) ruleUpsert(gc *gin.Context) {
 		f.Errors["config_json"] = "Must be valid JSON (or empty object {})."
 	}
 	if len(f.Errors) > 0 {
+		// Re-populate the tenant-name hint list so the re-render
+		// keeps showing it. Cheap; tenant list is small.
+		f.Tenants = c.listTenantHints(gc)
 		c.Render(gc, "pages/rules/edit", f)
 		return
 	}

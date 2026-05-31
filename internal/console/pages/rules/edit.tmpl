@@ -57,6 +57,13 @@
       <div class="field">
         <label for="tenant_id" class="field-label">Tenant ID</label>
         <input id="tenant_id" name="tenant_id" type="number" min="1" class="field-input" value="{{ if .Body.TenantID }}{{ .Body.TenantID }}{{ end }}">
+        <p class="field-help">
+          Numeric tenant ID. Leave blank to apply to <strong>all tenants</strong>.
+          {{ if .Body.Tenants }}
+          Known tenants:
+            {{ range $i, $t := .Body.Tenants }}{{ if $i }}, {{ end }}<code>{{ $t.ID }}</code> ({{ $t.Name }}){{ end }}.
+          {{ end }}
+        </p>
       </div>
     </div>
     <div class="grid grid-2">
@@ -75,7 +82,11 @@
     <div class="field">
       <label for="config_json" class="field-label">config_json</label>
       <textarea id="config_json" name="config_json" class="field-textarea" rows="6" style="font-family:var(--mono);font-size:0.85rem">{{ .Body.ConfigJSON }}</textarea>
-      <p class="field-help">Kind-specific JSON. See docs/supply-chain.md for shapes (cooldown: {"days":7}, license: {"allow":["MIT"]}, blocklist: {}).</p>
+      <p class="field-help">Kind-specific JSON. Shapes:
+        <code>cooldown</code>: <code>{"min_age_days": 14}</code> (optional <code>"time_source": "ingest" | "upstream_publish"</code>);
+        <code>license</code>: <code>{"allow": ["MIT", "Apache-2.0"]}</code> (optional <code>"on_unknown": "warn" | "deny"</code>);
+        <code>blocklist</code>: <code>{}</code> (selectors do the matching).
+      </p>
       {{ with index .Body.Errors "config_json" }}<p class="field-error">{{ . }}</p>{{ end }}
     </div>
 
