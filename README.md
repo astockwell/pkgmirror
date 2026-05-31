@@ -37,7 +37,7 @@ Each format has two independent capability axes:
 | `pypi` | shipped | **shipped** | wheel + sdist upload, PEP 503 simple index, PEP 691 JSON; pull-through against pypi.org with policy gating on cold path |
 | `npm` | shipped | planned | publish, packument, tarball download, dist-tags, scoped packages |
 | `rubygems` | shipped | planned | `gem push` / `gem install`, compact index, legacy `specs.4.8.gz`, yank |
-| `container` (OCI) | shipped | not planned | OCI distribution v1.1: manifests, blobs (monolithic + chunked), tags, token-exchange auth dance. Pull-through is out-of-scope — clients can already point directly at any OCI registry. |
+| `container` (OCI) | shipped | planned | OCI distribution v1.1: manifests, blobs (monolithic + chunked), tags, token-exchange auth dance |
 | `generic` | shipped | not planned | PUT/GET/DELETE arbitrary blobs at `<name>/<version>/<filename>`. No upstream by definition. |
 | `alpine` | shipped | planned | `apk add` / `apk update`, signed APKINDEX.tar.gz, per-tenant RSA key |
 | `maven` | shipped | planned | `mvn deploy` / `mvn dependency:get`, POM metadata extraction, generated `maven-metadata.xml`, SHA-1/MD5/SHA-256/SHA-512 sidecar verification |
