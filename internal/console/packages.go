@@ -121,7 +121,16 @@ type packageDetailData struct {
 	Tenant    *tenants.Tenant
 	Package   *models.Package
 	Versions  []versionRow
-	CanManage bool // system admin -> render delete buttons
+	CanManage bool // system admin -> render delete buttons + provenance flip form
+
+	// ProvenanceLabel is the human-readable form of Package.CreatedVia
+	// used by the badge. "mirrored from upstream" / "uploaded".
+	ProvenanceLabel string
+	// ProvenanceFlipTarget is the value to set on the flip-form button
+	// (i.e. the OPPOSITE of the current provenance). Empty when the
+	// current value isn't a known constant - we'd rather not surface
+	// the toggle than guess wrong.
+	ProvenanceFlipTarget string
 }
 
 type versionRow struct {
@@ -184,8 +193,37 @@ func (c *Console) packageDetail(gc *gin.Context) {
 	}
 	c.Render(gc, "pages/packages/detail", packageDetailData{
 		Tenant: t, Package: pkg, Versions: rows,
-		CanManage: id.IsSystemAdmin(),
+		CanManage:            id.IsSystemAdmin(),
+		ProvenanceLabel:      provenanceLabel(pkg.CreatedVia),
+		ProvenanceFlipTarget: provenanceFlipTarget(pkg.CreatedVia),
 	})
+}
+
+// provenanceLabel renders a CreatedVia value for human display.
+// Unknown values (operators occasionally set future-binary values
+// via direct UPDATE) round-trip to the raw string so the page
+// stays informative.
+func provenanceLabel(v models.CreatedVia) string {
+	switch v {
+	case models.CreatedViaUploaded:
+		return "uploaded"
+	case models.CreatedViaPullThrough:
+		return "mirrored from upstream"
+	}
+	return string(v)
+}
+
+// provenanceFlipTarget returns the CreatedVia value the flip button
+// should set. Returns empty for unknown current values so the
+// template can hide the form rather than guess.
+func provenanceFlipTarget(v models.CreatedVia) string {
+	switch v {
+	case models.CreatedViaUploaded:
+		return string(models.CreatedViaPullThrough)
+	case models.CreatedViaPullThrough:
+		return string(models.CreatedViaUploaded)
+	}
+	return ""
 }
 
 // quarantineListData drives pages/quarantine/list.
@@ -356,6 +394,64 @@ func (c *Console) packageDelete(gc *gin.Context) {
 		fmt.Sprintf("Deleted package %s/%s (%d version%s).", pkg.Type, pkg.Name, len(vers), plural(len(vers))))
 	gc.Redirect(http.StatusSeeOther,
 		"/console/tenants/"+t.Name+"/packages")
+}
+
+// packageSetProvenance is the admin override for packages.created_via.
+// Looks up the package by (tenant, type, name), validates the new
+// value against models.CreatedVia.Valid(), persists, and audits.
+// Per plans/created-via-package-ownership.md, the security-relevant
+// implication ('pull_through' enables the /simple/ merge and the
+// upload-against-pull_through 409) is shown in the form's confirm
+// dialog rather than buried in a tooltip.
+func (c *Console) packageSetProvenance(gc *gin.Context) {
+	ctx := gc.Request.Context()
+	id := auth.FromContext(gc)
+
+	t, ok := c.resolveTenantFromPath(gc)
+	if !ok {
+		return
+	}
+	pkgType := gc.Param("type")
+	pkgName := gc.Param("pkgname")
+	if pkgType == "" || pkgName == "" {
+		c.RenderNotFound(gc, "package not specified")
+		return
+	}
+
+	newVia := models.CreatedVia(gc.PostForm("created_via"))
+	if !newVia.Valid() {
+		c.RenderError(gc, "set package provenance",
+			fmt.Errorf("created_via %q is not a recognized value", newVia))
+		return
+	}
+
+	pkg, err := c.models.GetPackage(ctx, t.ID, models.Type(pkgType), pkgName)
+	if err != nil {
+		if errors.Is(err, models.ErrPackageNotExist) {
+			c.RenderNotFound(gc, "package %s/%s not found in tenant %s", pkgType, pkgName, t.Name)
+			return
+		}
+		c.RenderError(gc, "look up package", err)
+		return
+	}
+	old := pkg.CreatedVia
+
+	if err := c.models.SetPackageCreatedVia(ctx, pkg.ID, newVia); err != nil {
+		c.RenderError(gc, "update provenance", err)
+		return
+	}
+	c.auditPackage(gc, id, t.ID, "tenants.package.set_provenance", map[string]any{
+		"package_id":   pkg.ID,
+		"package_type": string(pkg.Type),
+		"package_name": pkg.Name,
+		"old":          string(old),
+		"new":          string(newVia),
+	})
+	middleware.AddFlash(gc, middleware.FlashSuccess,
+		fmt.Sprintf("Provenance for %s/%s set to %q.",
+			pkg.Type, pkg.Name, provenanceLabel(newVia)))
+	gc.Redirect(http.StatusSeeOther,
+		"/console/tenants/"+t.Name+"/packages/"+pkgType+"/"+pkgName)
 }
 
 // versionDelete drops a single version from a package; the package row

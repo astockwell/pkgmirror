@@ -1,19 +1,44 @@
 {{ define "pages/packages/detail" }}
 <section class="page-section">
   <header class="page-header">
-    <h1>{{ .Body.Package.Name }} <span class="muted" style="font-size:1rem">({{ .Body.Package.Type }})</span></h1>
+    <h1>
+      {{ .Body.Package.Name }}
+      <span class="muted" style="font-size:1rem">({{ .Body.Package.Type }})</span>
+      {{ if eq (printf "%s" .Body.Package.CreatedVia) "pull_through" }}
+        <span class="user-badge" title="pkgmirror first ingested this package via upstream pull-through. The /simple/ merge will include upstream versions; uploads to this package name will be refused.">{{ .Body.ProvenanceLabel }}</span>
+      {{ else }}
+        <span class="user-badge" title="A tenant uploaded this package first. pkgmirror will never reach upstream for this name (typosquat defense).">{{ .Body.ProvenanceLabel }}</span>
+      {{ end }}
+    </h1>
     <p class="muted">
       Tenant <a href="/console/tenants/{{ .Body.Tenant.Name }}">{{ .Body.Tenant.Name }}</a>
       &middot; <a href="/console/tenants/{{ .Body.Tenant.Name }}/packages">All packages</a>
     </p>
     {{ if .Body.CanManage }}
-    <form method="post"
-          action="/console/tenants/{{ .Body.Tenant.Name }}/packages/{{ .Body.Package.Type }}/{{ .Body.Package.Name }}/delete"
-          style="margin-top:8px;display:inline">
-      {{ .Base.CSRFField }}
-      <button type="submit" class="btn btn-ghost btn-sm"
-              onclick="return confirm('Permanently delete {{ .Body.Package.Type }}/{{ .Body.Package.Name }} and all {{ len .Body.Versions }} version(s) from {{ .Body.Tenant.Name }}? This cannot be undone.')">Delete entire package</button>
-    </form>
+    <div style="margin-top:8px">
+      <form method="post"
+            action="/console/tenants/{{ .Body.Tenant.Name }}/packages/{{ .Body.Package.Type }}/{{ .Body.Package.Name }}/delete"
+            style="display:inline">
+        {{ .Base.CSRFField }}
+        <button type="submit" class="btn btn-ghost btn-sm"
+                onclick="return confirm('Permanently delete {{ .Body.Package.Type }}/{{ .Body.Package.Name }} and all {{ len .Body.Versions }} version(s) from {{ .Body.Tenant.Name }}? This cannot be undone.')">Delete entire package</button>
+      </form>
+      {{ if .Body.ProvenanceFlipTarget }}
+      <form method="post"
+            action="/console/tenants/{{ .Body.Tenant.Name }}/packages/{{ .Body.Package.Type }}/{{ .Body.Package.Name }}/provenance"
+            style="display:inline">
+        {{ .Base.CSRFField }}
+        <input type="hidden" name="created_via" value="{{ .Body.ProvenanceFlipTarget }}">
+        {{ if eq .Body.ProvenanceFlipTarget "pull_through" }}
+          <button type="submit" class="btn btn-ghost btn-sm"
+                  onclick="return confirm('Change provenance to pull_through?\n\nThis ENABLES upstream merge for this package: the /simple/ index will start including upstream versions, and uploads to this package will be REFUSED until you flip back.\n\nUse this when an admin-tagged package is actually a mirror of an upstream one.')">Flip to mirrored from upstream</button>
+        {{ else }}
+          <button type="submit" class="btn btn-ghost btn-sm"
+                  onclick="return confirm('Change provenance to uploaded?\n\nThis DISABLES upstream merge for this package: the /simple/ index will only show locally-persisted versions, and uploads to this package will be ALLOWED.\n\nUse this to take ownership of a pulled-through package name (e.g., to start publishing your own forks).')">Flip to uploaded</button>
+        {{ end }}
+      </form>
+      {{ end }}
+    </div>
     {{ end }}
   </header>
 

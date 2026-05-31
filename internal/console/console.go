@@ -213,6 +213,7 @@ func (c *Console) Register(r *gin.Engine) error {
 	// prompt. Blobs themselves are kept (content-addressed); GC is a
 	// future pass.
 	adminOnly.POST("/tenants/:name/packages/:type/:pkgname/delete", c.packageDelete)
+	adminOnly.POST("/tenants/:name/packages/:type/:pkgname/provenance", c.packageSetProvenance)
 	adminOnly.POST("/tenants/:name/packages/:type/:pkgname/versions/:version_id/delete", c.versionDelete)
 
 	// Upstream pull-through (system admin only; the host allowlist is
