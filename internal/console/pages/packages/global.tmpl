@@ -1,0 +1,36 @@
+{{ define "pages/packages/global" }}
+<section class="page-section">
+  <header class="page-header">
+    <h1>Packages</h1>
+    <p class="muted">All packages across every tenant you can read. Use <a href="/console/tenants">Tenants</a> to manage tenant-specific settings, or click a package to view its versions.</p>
+  </header>
+
+  {{ if .Body.Rows }}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Tenant</th>
+        <th>Format</th>
+        <th>Package</th>
+        <th>Versions</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Body.Rows }}
+      <tr>
+        <td><a href="/console/tenants/{{ .TenantName }}">{{ .TenantName }}</a></td>
+        <td>{{ .Type }}</td>
+        <td><a href="/console/tenants/{{ .TenantName }}/packages/{{ .Type }}/{{ .Name }}">{{ .Name }}</a></td>
+        <td>{{ .Versions }}</td>
+        <td><a href="/console/tenants/{{ .TenantName }}/packages/{{ .Type }}/{{ .Name }}">View</a></td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  {{ template "ui/alert" (dict "severity" "info" "title" "No packages"
+        "body" "No tenant you can read has any packages yet. Upload one via the registry API or wait for a pull-through fetch to land.") }}
+  {{ end }}
+</section>
+{{ end }}

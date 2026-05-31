@@ -197,6 +197,10 @@ func (c *Console) Register(r *gin.Engine) error {
 	authed.GET("/tenants/:name", c.tenantDetail)
 	authed.GET("/tenants/:name/packages", c.packagesByTenant)
 	authed.GET("/tenants/:name/packages/:type/:pkgname", c.packageDetail)
+
+	// Global cross-tenant packages list (sidebar Packages link).
+	// Same access model as /tenants: rows filtered by CanRead.
+	authed.GET("/packages", c.packagesGlobal)
 	adminOnly := authed.Group("", c.middleware.RequireSystemAdmin())
 	adminOnly.GET("/tenants/new", c.tenantNew)
 	adminOnly.POST("/tenants", c.tenantCreate)

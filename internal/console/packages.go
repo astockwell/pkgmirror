@@ -30,6 +30,58 @@ type packageRow struct {
 	Versions  int
 }
 
+// packagesGlobalData drives pages/packages/global. Lists every package
+// across every tenant the viewer can read - same access model as
+// tenantsList (system admins see all; everyone else sees only their
+// tenants). The sidebar Packages link routes here so users have a
+// useful landing page even before they've picked a tenant.
+type packagesGlobalData struct {
+	Rows []globalPackageRow
+}
+
+type globalPackageRow struct {
+	TenantName string
+	Type       string
+	Name       string
+	Versions   int
+}
+
+// packagesGlobal is the sidebar Packages destination - a cross-tenant
+// listing scoped to whatever tenants the viewer can read. Read-only;
+// delete + per-package actions live on the per-tenant detail page so
+// we don't have to reimplement the system-admin gating here.
+func (c *Console) packagesGlobal(gc *gin.Context) {
+	ctx := gc.Request.Context()
+	id := auth.FromContext(gc)
+
+	all, err := c.tenants.List(ctx)
+	if err != nil {
+		c.RenderError(gc, "list tenants", err)
+		return
+	}
+	rows := []globalPackageRow{}
+	for _, t := range all {
+		if id == nil || !id.CanRead(t.ID) {
+			continue
+		}
+		pkgs, err := c.models.ListPackages(ctx, t.ID, "")
+		if err != nil {
+			c.RenderError(gc, "list packages", err)
+			return
+		}
+		for _, p := range pkgs {
+			vers, _ := c.models.ListVersions(ctx, p.ID)
+			rows = append(rows, globalPackageRow{
+				TenantName: t.Name,
+				Type:       string(p.Type),
+				Name:       p.Name,
+				Versions:   len(vers),
+			})
+		}
+	}
+	c.Render(gc, "pages/packages/global", packagesGlobalData{Rows: rows})
+}
+
 // packagesByTenant lists every package inside a tenant. Read-only.
 func (c *Console) packagesByTenant(gc *gin.Context) {
 	ctx := gc.Request.Context()
