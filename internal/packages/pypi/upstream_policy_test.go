@@ -57,6 +57,7 @@ type policyFixture struct {
 	adminToken     string
 	tenantName     string
 	tenantID       int64
+	models         *models.Store
 	freshVersion   string
 	freshSha       string
 	freshUnix      int64
@@ -279,6 +280,7 @@ func newPolicyFixture(t *testing.T, ruleConfig cooldown.Config, ruleAction strin
 		adminToken:     res.GeneratedAdminToken,
 		tenantName:     res.DefaultTenant.Name,
 		tenantID:       res.DefaultTenant.ID,
+		models:         pkgModels,
 		freshVersion:   freshVersion,
 		freshSha:       freshSha,
 		freshUnix:      freshUnix,
@@ -402,6 +404,94 @@ func TestPullThroughIndex_IngestSourceCooldownBlocksEverything(t *testing.T) {
 	}
 	if strings.Contains(string(body), f.freshVersion) || strings.Contains(string(body), f.staleVersion) {
 		t.Errorf("expected ingest-source cooldown to block every cold-path version; got %s", body)
+	}
+}
+
+// TestPullThroughDownload_QuarantinePersistsButHidesBytes proves the
+// quarantine action keeps its documented semantic ("store, but hide")
+// on the pull-through download path - the upstream wheel IS fetched
+// and persisted (so an admin can later promote it), but the inflight
+// requester gets 403 instead of the bytes, matching how a hand-
+// uploaded quarantined version behaves. Without the post-ingest Read
+// gate, the very first downloader after a fresh version landed would
+// bypass the rule entirely (uv would lock that version into its
+// resolved set and every subsequent caller would also be blocked,
+// but the bytes would already be inside the org's build).
+func TestPullThroughDownload_QuarantinePersistsButHidesBytes(t *testing.T) {
+	f := newPolicyFixture(t,
+		cooldown.Config{MinAgeDays: 45, TimeSource: cooldown.TimeSourceUpstreamPublish},
+		"quarantine",
+	)
+	base := "/api/packages/" + f.tenantName + "/pypi"
+
+	// Inflight request for a fresh-enough-to-quarantine wheel:
+	// expect 403 with the cooldown reason, NOT the wheel bytes.
+	resp, body := f.get(t, base+"/files/requests/"+f.freshVersion+
+		"/requests-"+f.freshVersion+"-py3-none-any.whl")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 from quarantine on inflight pull-through, got status=%d body=%s",
+			resp.StatusCode, body)
+	}
+	if !strings.Contains(strings.ToLower(string(body)), "cooldown") {
+		t.Errorf("expected 'cooldown' in 403 reason, got: %s", body)
+	}
+
+	// Critical: the wheel WAS fetched + persisted. This is the
+	// difference between deny (no row at all) and quarantine (row
+	// stored, hidden, promotable).
+	if got := atomic.LoadInt32(f.blobHits); got != 1 {
+		t.Errorf("expected exactly 1 upstream blob fetch on quarantine ingest, got %d", got)
+	}
+
+	pkg, err := f.models.GetPackageByLookup(context.Background(),
+		f.tenantID, models.TypePyPI, "requests")
+	if err != nil {
+		t.Fatalf("quarantined version should have produced a package row; got err: %v", err)
+	}
+	versions, err := f.models.ListVersions(context.Background(), pkg.ID)
+	if err != nil {
+		t.Fatalf("list versions: %v", err)
+	}
+	var found *models.Version
+	for _, v := range versions {
+		if v.Version == f.freshVersion {
+			found = v
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected quarantined version %s to exist on disk for admin to promote later; got versions=%v",
+			f.freshVersion, versions)
+	}
+	files, err := f.models.ListFilesByVersion(context.Background(), found.ID)
+	if err != nil {
+		t.Fatalf("list files: %v", err)
+	}
+	if len(files) != 1 {
+		t.Errorf("expected exactly 1 persisted file for the quarantined version, got %d", len(files))
+	}
+
+	// A second request for the same file must also be blocked - this
+	// proves the post-ingest /files/ checkRead path catches it too
+	// (i.e., the quarantine isn't a one-time pre-ingest fluke).
+	resp2, body2 := f.get(t, base+"/files/requests/"+f.freshVersion+
+		"/requests-"+f.freshVersion+"-py3-none-any.whl")
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Errorf("expected subsequent download to also 403; got status=%d body=%s",
+			resp2.StatusCode, body2)
+	}
+	if got := atomic.LoadInt32(f.blobHits); got != 1 {
+		t.Errorf("subsequent request should serve from local check (no extra upstream fetch); got blobHits=%d",
+			got)
+	}
+
+	// And the cold /simple/ filter also hides it from listings.
+	resp3, body3 := f.get(t, base+"/simple/requests/")
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("simple status=%d body=%s", resp3.StatusCode, body3)
+	}
+	if strings.Contains(string(body3), f.freshVersion) {
+		t.Errorf("expected quarantined fresh version hidden from /simple/; got %s", body3)
 	}
 }
 

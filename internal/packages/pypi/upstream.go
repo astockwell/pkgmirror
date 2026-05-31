@@ -467,6 +467,37 @@ func (h *Handler) pullThroughDownload(c *gin.Context, tenant *tenants.Tenant, lo
 		}
 	}
 
+	// Post-ingest Read gate. Pre-ingest we only stopped on Deny so a
+	// `quarantine`-action rule would let the wheel be persisted (which
+	// is the documented quarantine semantic - "store, but hide"). The
+	// inflight request, however, must NOT receive the bytes either,
+	// or the very first downloader bypasses every quarantine. Hand
+	// the future Read decision back as 403 with the same reason the
+	// post-ingest /simple/ filter and /files/ direct path would use;
+	// the persisted row stays so an admin can promote it later.
+	if h.Engine != nil {
+		readSubj := h.subjectFor(tenant, pkgRow, ver, filename, "")
+		// subjectFor reads upstream_published_unix off the (already
+		// in-memory) ver row, which was loaded BEFORE the stamp above
+		// fired. Patch it in from the pubUnix we already know so the
+		// time_source: upstream_publish branch evaluates the same
+		// here as it does on a subsequent /files/ request that loads
+		// a fresh ver row.
+		if havePub {
+			if readSubj.Attrs == nil {
+				readSubj.Attrs = map[string]any{}
+			}
+			if _, set := readSubj.Attrs["upstream_published_unix"]; !set {
+				readSubj.Attrs["upstream_published_unix"] = pubUnix
+			}
+		}
+		r := h.Engine.Evaluate(c.Request.Context(), readSubj, policy.ActionRead)
+		if r.IsBlocked() {
+			c.String(http.StatusForbidden, "%s", policyReason(r))
+			return true, nil
+		}
+	}
+
 	files, err := h.Models.ListFilesByVersion(c.Request.Context(), ver.ID)
 	if err != nil {
 		return false, fmt.Errorf("list persisted files: %w", err)
