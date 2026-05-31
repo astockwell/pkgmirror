@@ -31,6 +31,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/astockwell/pkgmirror/internal/models"
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
@@ -356,6 +357,16 @@ func (h *Handler) pullThroughDownload(c *gin.Context, tenant *tenants.Tenant, lo
 	if err != nil {
 		return false, fmt.Errorf("re-lookup persisted version: %w", err)
 	}
+
+	// Best-effort: stamp the version with upstream's publish time so
+	// the cooldown evaluator's time_source: upstream_publish mode can
+	// gate by upstream age, not by ingest age. Failure here is logged
+	// but never blocks the download - the cooldown rule will just fall
+	// back to ingest age (see internal/policy/cooldown ageSecondsFor).
+	if !ver.UpstreamPublishedUnix.Valid {
+		h.stampUpstreamPublished(c, tenant, ver, lookupName, useVersion)
+	}
+
 	files, err := h.Models.ListFilesByVersion(c.Request.Context(), ver.ID)
 	if err != nil {
 		return false, fmt.Errorf("list persisted files: %w", err)
@@ -430,3 +441,96 @@ var pulledThroughTmpl = template.Must(template.New("upstream").Parse(
 {{range .Files}}<a href="{{.URL}}#sha256={{.SHA256}}">{{.Filename}}</a>
 {{end}}</body></html>
 `))
+
+// ----- Warehouse JSON two-hop for upstream_published_unix -----
+//
+// The PEP 691 / PEP 503 simple index does NOT carry an upload time
+// per file. To populate package_versions.upstream_published_unix
+// (which the cooldown rule's time_source=upstream_publish reads) we
+// do a second fetch to PyPI's Warehouse JSON API:
+//
+//     GET https://pypi.org/pypi/<name>/<version>/json
+//
+// The response includes urls[] (one per artifact); each has
+// upload_time_iso_8601 in RFC 3339 form (e.g. "2026-05-14T19:23:11.123456Z").
+// We take the MIN of those - some packages publish wheels for
+// different platforms over a span of hours; the earliest upload is
+// when the version first existed upstream.
+//
+// This is best-effort: an upstream that doesn't speak Warehouse JSON
+// (custom mirrors), a parse failure, or a network timeout all leave
+// upstream_published_unix NULL and the cooldown evaluator falls back
+// to ingest age (with a Reason annotation per PR G).
+
+// warehouseURLs is the JSON shape of pypi.org/pypi/<name>/<version>/json's
+// urls[] array. We only need the field that carries the upload time.
+type warehouseURLs struct {
+	URLs []struct {
+		UploadTimeISO8601 string `json:"upload_time_iso_8601"`
+	} `json:"urls"`
+}
+
+// stampUpstreamPublished fires the Warehouse two-hop and persists the
+// result. Never returns an error - failure modes (network, parse,
+// non-PyPI upstream) just leave the column NULL, and ingest age
+// remains the fallback. Logged via the gin context for ops to spot
+// in the access log; not surfaced to the client.
+func (h *Handler) stampUpstreamPublished(c *gin.Context, tenant *tenants.Tenant, ver *models.Version, lookupName, version string) {
+	if h.Upstream == nil {
+		return
+	}
+	req := upstream.Request{
+		TenantID:     tenant.ID,
+		Format:       "pypi",
+		Kind:         upstream.KindMetadata,
+		UpstreamPath: "/pypi/" + lookupName + "/" + version + "/json",
+		CanonicalKey: fmt.Sprintf("pypi:%d:%s:%s:warehouse", tenant.ID, lookupName, version),
+	}
+	res, err := h.Upstream.Fetch(c.Request.Context(), req)
+	if err != nil {
+		// Mirror doesn't speak Warehouse JSON, or transient failure.
+		// Leave upstream_published_unix NULL.
+		return
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return
+	}
+	var payload warehouseURLs
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return
+	}
+	earliest := earliestUpload(payload)
+	if earliest == 0 {
+		return
+	}
+	// Persist; on race with DELETE we ignore ErrVersionNotExist.
+	_ = h.Models.SetUpstreamPublishedUnix(c.Request.Context(), ver.ID, earliest)
+}
+
+// earliestUpload returns the smallest valid upload_time_iso_8601 from
+// the Warehouse payload, as a unix timestamp. 0 when none parse.
+func earliestUpload(p warehouseURLs) int64 {
+	var min int64
+	for _, u := range p.URLs {
+		t, err := time.Parse(time.RFC3339, u.UploadTimeISO8601)
+		if err != nil {
+			// Warehouse uses fractional seconds + 'Z'; RFC3339 accepts
+			// that. If it ever doesn't, try RFC3339Nano explicitly.
+			t, err = time.Parse(time.RFC3339Nano, u.UploadTimeISO8601)
+			if err != nil {
+				continue
+			}
+		}
+		ts := t.Unix()
+		if ts <= 0 {
+			continue
+		}
+		if min == 0 || ts < min {
+			min = ts
+		}
+	}
+	return min
+}

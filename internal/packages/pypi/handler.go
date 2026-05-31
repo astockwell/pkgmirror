@@ -562,6 +562,13 @@ func (h *Handler) subjectFor(tenant *tenants.Tenant, pkg *models.Package, ver *m
 			"created_unix":       ver.CreatedUnix,
 			"ingest_age_seconds": time.Now().Unix() - ver.CreatedUnix,
 		}
+		// Surface upstream publish time when the pull-through adapter
+		// captured it (see upstream.go stampUpstreamPublished). The
+		// cooldown evaluator's time_source: upstream_publish mode reads
+		// this; absent the attribute it falls back to ingest age.
+		if ver.UpstreamPublishedUnix.Valid {
+			s.Attrs["upstream_published_unix"] = ver.UpstreamPublishedUnix.Int64
+		}
 		// Caller-supplied license (upload form) takes precedence;
 		// otherwise fall back to the value stored on the version row.
 		if license != "" {

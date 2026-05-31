@@ -77,6 +77,15 @@ type Version struct {
 	// QuarantinedByRuleID identifies which policy rule triggered the
 	// quarantine, when one did.
 	QuarantinedByRuleID sql.NullInt64
+	// UpstreamPublishedUnix is the upstream's stated publish time for
+	// this version, populated by per-format pull-through adapters when
+	// the upstream metadata carries one (PyPI: Warehouse JSON
+	// urls[].upload_time_iso_8601; npm: packument time[<version>]; etc.).
+	// NULL means "no upstream publish time known" - locally-uploaded
+	// versions and adapters that don't surface it leave this empty.
+	// Consumed by the cooldown evaluator's time_source: upstream_publish
+	// knob (see internal/policy/cooldown).
+	UpstreamPublishedUnix sql.NullInt64
 }
 
 // IsQuarantined reports whether this version is currently hidden.
@@ -292,7 +301,8 @@ func (s *Store) CreateVersion(ctx context.Context, packageID int64, version, met
 // versionColumns lists every column read by version-scanning queries.
 // Keep the order in sync with scanVersion.
 const versionColumns = `id, package_id, version, lower_version, metadata_json,
-        created_unix, license, quarantine_reason, quarantined_by_rule_id`
+        created_unix, license, quarantine_reason, quarantined_by_rule_id,
+        upstream_published_unix`
 
 func scanVersion(scanner interface {
 	Scan(dest ...any) error
@@ -301,6 +311,7 @@ func scanVersion(scanner interface {
 	if err := scanner.Scan(
 		&v.ID, &v.PackageID, &v.Version, &v.LowerVersion, &v.MetadataJSON,
 		&v.CreatedUnix, &v.License, &v.QuarantineReason, &v.QuarantinedByRuleID,
+		&v.UpstreamPublishedUnix,
 	); err != nil {
 		return nil, err
 	}
@@ -408,6 +419,35 @@ func (s *Store) SetLicense(ctx context.Context, versionID int64, license string)
 	_, err := s.DB.ExecContext(ctx,
 		`UPDATE package_versions SET license = ? WHERE id = ?`, arg, versionID)
 	return err
+}
+
+// SetUpstreamPublishedUnix records the upstream's stated publish time
+// for a version. Per-format pull-through adapters call this once they
+// extract the value from upstream metadata (PyPI: Warehouse JSON
+// urls[].upload_time_iso_8601; npm: packument time[<version>]; etc.).
+// Passing 0 or negative clears the column to NULL so callers don't
+// need a separate "unset" helper.
+//
+// Missing version rows are reported via the rows-affected check; a
+// concurrent delete of the version is rare but possible so we don't
+// loudly fail - return ErrVersionNotExist and let the caller decide
+// whether to log/retry.
+func (s *Store) SetUpstreamPublishedUnix(ctx context.Context, versionID, publishedUnix int64) error {
+	var arg any
+	if publishedUnix > 0 {
+		arg = publishedUnix
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE package_versions SET upstream_published_unix = ? WHERE id = ?`,
+		arg, versionID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrVersionNotExist
+	}
+	return nil
 }
 
 // UpdateVersionMetadata replaces the metadata_json column for one

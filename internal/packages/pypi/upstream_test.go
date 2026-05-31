@@ -42,14 +42,18 @@ import (
 //   - the upstream.Fetcher pointed at the fake, with the fake's host
 //     allowlisted and the private-IP guard disabled
 type upstreamFixture struct {
-	pkgmirror   *httptest.Server
-	fakePypi    *httptest.Server
-	adminToken  string
-	tenantName  string
-	indexHits   *int32
-	blobHits    *int32
-	wheelBody   []byte
-	wheelSha256 string
+	pkgmirror      *httptest.Server
+	fakePypi       *httptest.Server
+	adminToken     string
+	tenantName     string
+	tenantID       int64
+	models         *models.Store
+	indexHits      *int32
+	blobHits       *int32
+	warehouseHits  *int32
+	wheelBody      []byte
+	wheelSha256    string
+	warehouseUnix  int64 // upload_time we advertise from Warehouse stub
 }
 
 func newUpstreamFixture(t *testing.T) *upstreamFixture {
@@ -134,6 +138,23 @@ func newUpstreamFixture(t *testing.T) *upstreamFixture {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write(wheelBody)
 	})
+	// Warehouse JSON two-hop (PR for upstream_published_unix). Two
+	// urls[] entries with DIFFERENT upload times so we can prove the
+	// adapter takes the MIN. May-1 is the earliest; the wheel was
+	// republished later.
+	var warehouseHits int32
+	warehouseUnix := int64(1714521600) // 2024-05-01T00:00:00Z
+	realMux.HandleFunc("/pypi/requests/2.32.4/json", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&warehouseHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		// upload_time_iso_8601 uses Warehouse's exact format (fractional
+		// seconds, Z). Two entries: the wheel (May 1) and an sdist (May 5).
+		// Earliest wins.
+		_, _ = w.Write([]byte(`{"urls":[
+			{"upload_time_iso_8601":"2024-05-05T12:00:00.000000Z"},
+			{"upload_time_iso_8601":"2024-05-01T00:00:00.000000Z"}
+		]}`))
+	})
 	fakePypi.Config.Handler = realMux
 
 	// Build the upstream fetcher: allowlist + private IPs override
@@ -173,14 +194,18 @@ func newUpstreamFixture(t *testing.T) *upstreamFixture {
 	t.Cleanup(pkgmirror.Close)
 
 	return &upstreamFixture{
-		pkgmirror:   pkgmirror,
-		fakePypi:    fakePypi,
-		adminToken:  res.GeneratedAdminToken,
-		tenantName:  res.DefaultTenant.Name,
-		indexHits:   &indexHits,
-		blobHits:    &blobHits,
-		wheelBody:   wheelBody,
-		wheelSha256: wheelSha,
+		pkgmirror:     pkgmirror,
+		fakePypi:      fakePypi,
+		adminToken:    res.GeneratedAdminToken,
+		tenantName:    res.DefaultTenant.Name,
+		tenantID:      res.DefaultTenant.ID,
+		models:        pkgModels,
+		indexHits:     &indexHits,
+		blobHits:      &blobHits,
+		warehouseHits: &warehouseHits,
+		wheelBody:     wheelBody,
+		wheelSha256:   wheelSha,
+		warehouseUnix: warehouseUnix,
 	}
 }
 
@@ -313,5 +338,88 @@ func TestPullThrough_OffMeansNoUpstream(t *testing.T) {
 	// or our 404). Either way, no panic, no 502.
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for unknown package, got %d", resp.StatusCode)
+	}
+}
+
+// TestPullThrough_WarehouseStampsUpstreamPublished proves the
+// second-hop Warehouse fetch populates package_versions.upstream_published_unix
+// with the EARLIEST upload_time from the urls[] array.
+//
+// Sequence:
+//   1. pip-style download to trigger pull-through ingest
+//   2. ingest path calls h.stampUpstreamPublished -> Warehouse fetch
+//   3. Warehouse stub returns two urls[] entries (May 1 + May 5);
+//      adapter picks min = May 1 = 1714521600
+//   4. assert: warehouse stub got 1 hit; version row's
+//      upstream_published_unix == 1714521600
+func TestPullThrough_WarehouseStampsUpstreamPublished(t *testing.T) {
+	f := newUpstreamFixture(t)
+	base := "/api/packages/" + f.tenantName + "/pypi"
+
+	// Trigger ingest via download (also pre-warms the index).
+	_, _ = f.get(t, base+"/simple/requests/", true)
+	resp, _ := f.get(t, base+"/files/requests/2.32.4/requests-2.32.4-py3-none-any.whl", true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("download: status=%d", resp.StatusCode)
+	}
+
+	// Warehouse JSON should have been fetched exactly once.
+	if got := atomic.LoadInt32(f.warehouseHits); got != 1 {
+		t.Errorf("expected 1 Warehouse fetch, got %d", got)
+	}
+
+	// Version row carries the earliest upload_time.
+	pkg, err := f.models.GetPackageByLookup(context.Background(), f.tenantID, models.TypePyPI, "requests")
+	if err != nil {
+		t.Fatalf("get package: %v", err)
+	}
+	ver, err := f.models.GetVersion(context.Background(), pkg.ID, "2.32.4")
+	if err != nil {
+		t.Fatalf("get version: %v", err)
+	}
+	if !ver.UpstreamPublishedUnix.Valid {
+		t.Fatal("expected UpstreamPublishedUnix to be populated; got NULL")
+	}
+	if ver.UpstreamPublishedUnix.Int64 != f.warehouseUnix {
+		t.Errorf("UpstreamPublishedUnix = %d, want %d (earliest of two urls[])",
+			ver.UpstreamPublishedUnix.Int64, f.warehouseUnix)
+	}
+}
+
+// TestPullThrough_WarehouseFailureLeavesNull proves the stamp is
+// best-effort: when Warehouse 404s (or the upstream doesn't speak
+// Warehouse JSON), the column stays NULL and the download itself
+// still succeeds. The cooldown evaluator falls back to ingest age
+// in that case (see internal/policy/cooldown ageSecondsFor).
+func TestPullThrough_WarehouseFailureLeavesNull(t *testing.T) {
+	f := newUpstreamFixture(t)
+	base := "/api/packages/" + f.tenantName + "/pypi"
+
+	// Swap the Warehouse handler to always 404 - simulates a mirror
+	// that proxies /simple/ + /packages/ but not /pypi/.../json.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/simple/requests/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<a href="%s/packages/requests-2.32.4-py3-none-any.whl#sha256=%s">requests-2.32.4-py3-none-any.whl</a>`,
+			f.fakePypi.URL, f.wheelSha256)
+	})
+	mux.HandleFunc("/packages/requests-2.32.4-py3-none-any.whl", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(f.wheelBody)
+	})
+	mux.HandleFunc("/pypi/", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	f.fakePypi.Config.Handler = mux
+
+	resp, _ := f.get(t, base+"/files/requests/2.32.4/requests-2.32.4-py3-none-any.whl", true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("download: status=%d (Warehouse failure must not block)", resp.StatusCode)
+	}
+	pkg, _ := f.models.GetPackageByLookup(context.Background(), f.tenantID, models.TypePyPI, "requests")
+	ver, _ := f.models.GetVersion(context.Background(), pkg.ID, "2.32.4")
+	if ver.UpstreamPublishedUnix.Valid {
+		t.Errorf("UpstreamPublishedUnix should be NULL on Warehouse 404; got %d",
+			ver.UpstreamPublishedUnix.Int64)
 	}
 }
