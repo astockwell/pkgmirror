@@ -116,31 +116,73 @@ defers explicitly. Listed here for completeness.
 
 ---
 
-### F4. `GET /versions` global file is local-only
+### F4. `GET /versions` global file is local-only — BREAKS BUNDLER
 
 **Current:** [`serveVersionsFile`](../internal/packages/rubygems/handler.go#L293-L329)
 emits the compact-index "what packages exist, with which versions and
 md5 over the /info file" map from local rows only. Cold tenants see
-an empty file. Bundler then 404→pull-through-200s each gem it cares
-about individually, which works but is chatty.
+an empty file (just the `---\n` header).
 
-**Desired:** Either (a) a bandersnatch-style admin-triggered "sync
-from upstream" populates this lazily, or (b) merge upstream's global
-file with local state on every request. Both are substantial:
+The original write-up of this gap said "Bundler then 404→pull-through-200s
+each gem it cares about individually, which works but is chatty." **That
+was wrong.** Bundler treats `/versions` as the authoritative discovery
+endpoint per the compact-index spec: it asks `/versions` first to
+learn what packages exist in this source, then asks `/info/<gem>`
+only for packages `/versions` advertised. If `/versions` is empty,
+bundler concludes "this source has no gems" and fails with a
+misleading error:
 
-- (a) needs its own scheduler, sync job runner, and partial-failure
+```
+Your bundle is locked to <gem> (<version>) from rubygems repository
+https://rubygems.org/ or installed locally, but that version can no
+longer be found in that source.
+```
+
+This means `bundle install` against a cold pkgmirror tenant FAILS,
+period. The user-visible blast radius is "every bundler user on a
+fresh pkgmirror," which is most of the RubyGems user base.
+
+`gem install` works fine: it queries `/info/<name>` directly, no
+`/versions` discovery step. So `gem install rake --source <pkgmirror>`
+is unaffected. The two pkgmirror demo scripts
+([`docs/demos/ruby--script01--bundle-install.sh`](../docs/demos/ruby--script01--bundle-install.sh)
+and `--script02--bundle-install-cooldown.sh`) use `gem install` for
+exactly this reason.
+
+The integration test
+[`TestRubyGemsPullThrough_BundleInstallThor`](../tests/integration/rubygems/canary_test.go)
+**accidentally masked this bug** because it sets
+`bundle config mirror.https://rubygems.org.fallback_timeout 0.001` —
+a 1-millisecond fallback that lets bundler hit the real rubygems.org
+for `/versions` discovery and only re-checks pkgmirror for `/info` +
+`/gems`. A proper integration test would set a long fallback timeout
+(or use docker network isolation) so bundler can ONLY reach pkgmirror.
+
+**Desired:** Same options as the original write-up:
+
+- (a) Bandersnatch-style admin-triggered "sync from upstream" populates
+  `/versions` lazily — needs its own scheduler and partial-failure
   recovery. Probably its own plan.
-- (b) requires re-computing every package's md5 on every request,
-  because the md5 in `/versions` is over the corresponding `/info/<name>`
-  body — which we filter through policy and may emit differently from
-  upstream.
+- (b) Merge upstream's global file with local state on every request
+  — requires re-computing every package's md5 (the md5 in `/versions`
+  is over the corresponding `/info/<name>` body, which we filter
+  through policy and may emit differently from upstream).
+- (c) **Pragmatic:** Cold-proxy `/versions` verbatim from upstream
+  WITHOUT policy filtering or md5 recomputation, with a TTL the same
+  as `/info/<name>`. This gets bundler unstuck and trades
+  correctness-of-the-md5-checksums (which bundler uses for caching,
+  not for security) for getting the discovery step working.
 
-**Severity:** Convenience.
+**Severity:** Correctness, specifically for `bundle install` against
+a cold tenant. Note this was originally labeled "Convenience" — that
+was a misread. `gem install` is unaffected; bundler isn't.
 
-**Effort:** L for either path.
+**Effort:** L for (a) or (b); **S for (c)** — just stream the upstream
+`/versions` response through.
 
-**Documented?** Yes — [`rubygems-pull-through.md` §6](rubygems-pull-through.md#6-whats-intentionally-out-of-scope).
-Listed for completeness.
+**Documented?** Yes in [`rubygems-pull-through.md` §6](rubygems-pull-through.md#6-whats-intentionally-out-of-scope)
+as "out of scope for v1" — but the implication for bundler usage
+wasn't called out. Listed here with the corrected severity.
 
 ---
 
@@ -351,25 +393,31 @@ defers to "PR Q." Listed here for completeness.
 
 If you're picking gaps to close, the order I'd suggest:
 
-1. **X1 — `cache_only` mode honoring** (correctness, S each format).
+1. **F4 (option c) — verbatim cold-proxy `/versions`** (correctness, S).
+   Unblocks `bundle install` against cold tenants, which is most
+   real-world bundler usage. The fancy options (a) + (b) can come
+   later; (c) is "just stream upstream's response through" and is
+   a few hours of work.
+2. **X1 — `cache_only` mode honoring** (correctness, S each format).
    Silent misconfiguration is the worst kind of bug.
-2. **F2 — yanked-version handling** (correctness, S). Bundler relies
+3. **F2 — yanked-version handling** (correctness, S). Bundler relies
    on this; we're breaking the upstream protocol contract by stripping
    the marker.
-3. **F1 — platform gems on cold miss** (convenience, S). Highest
-   user-visible value; the gap is already documented + scoped.
-4. **X2 — ETag revalidation** (convenience, M shared). The
+4. **F1 — platform gems on cold miss** (convenience, S). Highest
+   user-visible value among the deferred-by-design gaps.
+5. **X2 — ETag revalidation** (convenience, M shared). The
    infrastructure is half-done; finishing it is one PR for all three
    formats and is a clear win.
-5. **X3 — `Retry-After` on 429** (convenience, XS). Quick win once
+6. **X3 — `Retry-After` on 429** (convenience, XS). Quick win once
    anything else here ships.
-6. **F7 — pre-release filtering** (convenience, S). Useful for
+7. **F7 — pre-release filtering** (convenience, S). Useful for
    security-conscious shops.
-7. **F6 — dependency graph indexing** (convenience, M). Real value
+8. **F6 — dependency graph indexing** (convenience, M). Real value
    for compliance/audit; not load-bearing.
-8. Everything else (F3, F4, F5, X4) — either intentionally deferred
-   or solving a problem no one has today.
+9. Everything else (F3, F5, X4) — either intentionally deferred or
+   solving a problem no one has today.
 
-Nothing here is a release-blocker; the shipped adapter handles the
-main `gem install` / `bundle install` flow correctly. These are the
-edges.
+The bundler-blocking F4 issue means the shipped adapter handles
+`gem install` correctly but NOT `bundle install` against a cold
+tenant. That's a meaningful caveat on the "shipped" status; closing
+F4(c) is the cheapest way to retire it.
