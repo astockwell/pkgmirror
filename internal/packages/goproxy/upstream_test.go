@@ -484,3 +484,87 @@ func TestPullThroughGo_OffMode(t *testing.T) {
 		t.Errorf("expected 404 with no pull-through; got %d", resp.StatusCode)
 	}
 }
+
+// TestPullThroughGo_LocalResolveHonorsUpstreamPublishCooldown is a
+// regression test for the bug where, under a time_source=upstream_publish
+// cooldown rule, a version that had ALREADY been ingested via the
+// pull-through path would 403 on the very next request as soon as the
+// handler hit the LOCAL resolve path (because the local subjectFor
+// didn't surface package_versions.upstream_published_unix and fell
+// back to ingest_age_seconds, which is 0 right after ingest).
+//
+// Reproduction in the wild: `go list -m -versions docker/compose/v2`
+// would fetch /@v/list, then go would ask for the @latest .info, which
+// went through servePullThroughInfo (Subject carries upstream_published_unix
+// → cooldown passes). That info handler also ingests the version as a
+// side effect. The very next .mod request resolves the version locally
+// → checkRead → subjectFor → MISSING upstream_published_unix → cooldown
+// falls back to ingest_age (~0s) → 403 with "fell back to ingest age -
+// upstream_published_unix unavailable" even though the upstream publish
+// was years ago.
+//
+// This test does the same dance in miniature: 30-day cooldown, stale
+// version (60d upstream), pull-through .info ingests it, then a follow-
+// up .mod and .zip must STILL succeed because the local row's
+// upstream_published_unix carries the >30d age across to subjectFor.
+func TestPullThroughGo_LocalResolveHonorsUpstreamPublishCooldown(t *testing.T) {
+	f := newUpstreamFixture(t, 30)
+	base := "/api/packages/" + f.tenantName + "/go"
+
+	// Step 1: hit the .info path for the stale version. Goes through
+	// servePullThroughInfo, which sets upstream_published_unix in the
+	// policy Subject AND ingests the version locally as a side effect.
+	resp, body := f.get(t, base+"/"+f.module+"/@v/"+f.staleVersion+".info")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("step 1 .info: expected 200, got %d body=%s", resp.StatusCode, body)
+	}
+
+	// Sanity: the local row has upstream_published_unix stamped.
+	pkg, err := f.models.GetPackage(context.Background(), f.tenantID, models.TypeGo, f.module)
+	if err != nil {
+		t.Fatalf("get package after ingest: %v", err)
+	}
+	ver, err := f.models.GetVersion(context.Background(), pkg.ID, f.staleVersion)
+	if err != nil {
+		t.Fatalf("get version after ingest: %v", err)
+	}
+	if !ver.UpstreamPublishedUnix.Valid || ver.UpstreamPublishedUnix.Int64 != f.staleUnix {
+		t.Fatalf("upstream_published_unix not stamped: valid=%v val=%d want=%d",
+			ver.UpstreamPublishedUnix.Valid, ver.UpstreamPublishedUnix.Int64, f.staleUnix)
+	}
+
+	// Step 2: the bug. With v1.0.0 freshly ingested, ingest_age_seconds
+	// is ~0. If subjectFor didn't surface upstream_published_unix, the
+	// cooldown would fall back to ingest age and 403 every follow-up
+	// request to this stale version. .mod must serve from local cache
+	// with 200.
+	resp, body = f.get(t, base+"/"+f.module+"/@v/"+f.staleVersion+".mod")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("step 2 .mod (local resolve, stale version): expected 200, got %d body=%s",
+			resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "module "+f.module) {
+		t.Errorf("step 2 .mod body missing module decl; got: %s", body)
+	}
+
+	// Same for .zip - exercises the file-serving branch of the local
+	// resolve path.
+	resp, body = f.get(t, base+"/"+f.module+"/@v/"+f.staleVersion+".zip")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("step 3 .zip (local resolve, stale version): expected 200, got %d body=%s",
+			resp.StatusCode, body)
+	}
+	if len(body) == 0 {
+		t.Errorf("step 3 .zip: empty body")
+	}
+
+	// And /@v/list, which uses filterReadable on local rows, must
+	// include the stale version (it's >30d upstream so cooldown allows).
+	resp, body = f.get(t, base+"/"+f.module+"/@v/list")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("step 4 /@v/list: expected 200, got %d body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), f.staleVersion) {
+		t.Errorf("step 4 /@v/list missing stale version; got %q", body)
+	}
+}

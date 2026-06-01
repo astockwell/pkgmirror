@@ -428,6 +428,15 @@ func (h *Handler) subjectFor(tenant *tenants.Tenant, pkg *models.Package, ver *m
 			"created_unix":       ver.CreatedUnix,
 			"ingest_age_seconds": time.Now().Unix() - ver.CreatedUnix,
 		}
+		// Surface upstream publish time when pullThroughIngest stamped
+		// it on the row. Cooldown rules with time_source=upstream_publish
+		// read this; absent the attribute they fall back to ingest age,
+		// which incorrectly trips for any version freshly ingested via
+		// pull-through (ingest_age_seconds==0 even when the upstream
+		// publish was years ago). Matches the PyPI handler's subjectFor.
+		if ver.UpstreamPublishedUnix.Valid {
+			s.Attrs["upstream_published_unix"] = ver.UpstreamPublishedUnix.Int64
+		}
 	}
 	return s
 }
