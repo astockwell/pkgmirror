@@ -9,6 +9,15 @@
         body { padding-top: 4.5rem; }
         pre.gomod { background: #f8f9fa; padding: 1rem; border-radius: .5rem; }
         code.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+        /* Bootstrap makes <code> bright red and .text-muted grey, both
+           of which are illegible on the blue .active list-group-item
+           background. Force them to inherit the active text color
+           (white) for the active row. */
+        .list-group-item.active code,
+        .list-group-item.active .text-muted {
+            color: inherit;
+        }
+        .list-group-item.active .text-muted { opacity: 0.85; }
     </style>
 </head>
 <body>
