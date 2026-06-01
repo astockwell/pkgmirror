@@ -22,9 +22,9 @@
 //
 // Canary set
 //   - rake:     deeply boring + stable; has been on RubyGems.org
-//               since basically day 1; pure Ruby.
+//     since basically day 1; pure Ruby.
 //   - thor:     pure Ruby, no native deps, used by every Rubygems-
-//               based CLI on the planet; very stable release cadence.
+//     based CLI on the planet; very stable release cadence.
 //
 // Both are picked because they're very unlikely to be yanked or
 // deleted from rubygems.org in any reasonable maintenance horizon
