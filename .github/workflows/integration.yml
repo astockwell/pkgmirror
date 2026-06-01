@@ -25,11 +25,11 @@ on:
   workflow_dispatch:
     inputs:
       format:
-        description: "Format to test (pypi | go | all)"
+        description: "Format to test (pypi | go | rubygems | all)"
         required: false
         default: "all"
         type: choice
-        options: [all, pypi, go]
+        options: [all, pypi, go, rubygems]
 
 permissions:
   contents: read
@@ -109,10 +109,44 @@ jobs:
           docker network ls
           docker images
 
+  rubygems:
+    name: RubyGems pull-through
+    if: ${{ github.event_name == 'schedule' || inputs.format == 'all' || inputs.format == 'rubygems' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Pre-pull ruby client image
+        # The pkgmirror image itself is built from the repo Dockerfile
+        # by testcontainers; only the client image needs pulling here.
+        run: docker pull ruby:3.3-slim
+
+      - name: Run RubyGems integration suite
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "false"
+        run: |
+          go test -tags=integration -timeout=15m -v ./tests/integration/rubygems/...
+
+      - name: Dump docker state on failure
+        if: failure()
+        run: |
+          docker ps -a
+          docker network ls
+          docker images
+
   # ----- failure notification -----
   notify:
     name: Open tracking issue on failure
-    needs: [pypi, go]
+    needs: [pypi, go, rubygems]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:

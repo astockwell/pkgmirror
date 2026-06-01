@@ -106,6 +106,7 @@ tests/integration/         # this suite (build tag: integration only)
     preflight.go             RequireReachable: t.Skip on upstream down
     pypi/canary_test.go      three install tests (pip / six / urllib3)
     go/canary_test.go        three install tests (rsc.io/quote / google/uuid)
+    rubygems/canary_test.go  three install tests (rake / thor / cache reuse)
 ```
 
 Future per-format additions go under `tests/integration/<format>/`. Each

@@ -25,10 +25,11 @@ const integrationUserAgent = "pkgmirror-integration-tests/0.1 " +
 //     runaway-loop circuit breaker)
 //
 // The compiled-in hostname allowlist already covers pypi.org +
-// files.pythonhosted.org; no env extension is needed for PyPI tests.
-// Future per-format integration tests (npm: registry.npmjs.org;
-// RubyGems: rubygems.org; etc.) get their hosts for free from the
-// same compiled-in defaults table.
+// files.pythonhosted.org (PyPI), proxy.golang.org + sum.golang.org
+// (Go), and rubygems.org + index.rubygems.org (RubyGems). No env
+// extension is needed for any of these. Future per-format integration
+// tests (npm: registry.npmjs.org; etc.) get their hosts for free
+// from the same compiled-in defaults table.
 func StartStack(ctx context.Context, t *testing.T) *harness.Stack {
 	t.Helper()
 	return harness.StartWithOptions(ctx, t, harness.Options{
