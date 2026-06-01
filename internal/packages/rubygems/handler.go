@@ -32,16 +32,18 @@ import (
 	pkgsvc "github.com/astockwell/pkgmirror/internal/packages"
 	"github.com/astockwell/pkgmirror/internal/policy"
 	"github.com/astockwell/pkgmirror/internal/tenants"
+	"github.com/astockwell/pkgmirror/internal/upstream"
 
 	"github.com/gin-gonic/gin"
 )
 
 // Handler is the RubyGems registry HTTP handler.
 type Handler struct {
-	Service *pkgsvc.Service
-	Models  *models.Store
-	Tenants *tenants.Store
-	Engine  policy.Engine
+	Service  *pkgsvc.Service
+	Models   *models.Store
+	Tenants  *tenants.Store
+	Engine   policy.Engine
+	Upstream upstream.Fetcher // optional; nil disables pull-through
 }
 
 // NewHandler constructs a Handler. If eng is nil the no-op engine is used.
@@ -50,6 +52,14 @@ func NewHandler(svc *pkgsvc.Service, m *models.Store, ts *tenants.Store, eng pol
 		eng = policy.NoopEngine{}
 	}
 	return &Handler{Service: svc, Models: m, Tenants: ts, Engine: eng}
+}
+
+// WithUpstream returns h with the pull-through fetcher attached. Nil-safe:
+// passing nil leaves pull-through off and every miss-path falls through
+// to the local 404.
+func (h *Handler) WithUpstream(f upstream.Fetcher) *Handler {
+	h.Upstream = f
+	return h
 }
 
 // Register mounts rubygems routes on g (expected to be scoped to
@@ -255,6 +265,15 @@ func (h *Handler) servePackageInfo(c *gin.Context) {
 	name := c.Param("package")
 	pkg, err := h.Models.GetPackage(c.Request.Context(), tenant.ID, models.TypeRubyGems, name)
 	if err != nil {
+		// Cold miss: try upstream pull-through. servePullThroughInfo
+		// fetches the compact-index /info/<name>, filters through
+		// policy, and writes the response. If it returns false the
+		// caller still has to 404.
+		if errors.Is(err, models.ErrPackageNotExist) && h.passthroughEnabled(c, tenant) {
+			if h.servePullThroughInfo(c, tenant, name) {
+				return
+			}
+		}
 		c.String(http.StatusNotFound, "Could not find package %s", name)
 		return
 	}
@@ -481,6 +500,22 @@ func (h *Handler) downloadPackageFile(c *gin.Context) {
 	filename := c.Param("filename")
 	pkg, ver, file, err := h.findByFilename(c, tenant, filename)
 	if err != nil {
+		// Cold miss: try upstream pull-through. servePullThroughGem
+		// fetches /info/<name> to get the SHA256, runs ActionIngest,
+		// downloads + verifies + persists the .gem, runs the post-
+		// ingest Read gate, then serves the bytes. v1 only handles
+		// ruby-platform filenames; platform-tagged ones return false
+		// here so we fall through to the 404 below.
+		if h.passthroughEnabled(c, tenant) {
+			served, perr := h.servePullThroughGem(c, tenant, filename)
+			if served {
+				return
+			}
+			if perr != nil {
+				c.String(http.StatusBadGateway, "%v", perr)
+				return
+			}
+		}
 		c.Status(http.StatusNotFound)
 		return
 	}
@@ -582,6 +617,24 @@ func (h *Handler) uploadPackageFile(c *gin.Context) {
 		return
 	}
 
+	// Provenance gate: refuse uploads to a gem that pkgmirror originally
+	// ingested via pull-through. Without this, an insider (or
+	// compromised CI token) could silently shadow an upstream gem by
+	// uploading a 'newer' version under the same name. The admin can
+	// either delete the package or flip its provenance to 'uploaded'
+	// via the console to take ownership. See
+	// plans/implemented/created-via-package-ownership.md.
+	if existing, perr := h.Models.GetPackage(c.Request.Context(), tenant.ID, models.TypeRubyGems, pkg.Name); perr == nil {
+		if existing.CreatedVia == models.CreatedViaPullThrough {
+			c.String(http.StatusConflict,
+				"gem %q is currently mirrored from upstream; "+
+					"delete it via /console/tenants/%s/packages/rubygems/%s "+
+					"first if you want to take ownership of this name",
+				existing.Name, tenant.Name, existing.LowerName)
+			return
+		}
+	}
+
 	metaJSON, _ := json.Marshal(pkg.Metadata)
 	_, ver, _, err := h.Service.CreatePackageAndAddFile(c.Request.Context(), pkgsvc.CreationInfo{
 		TenantID:            tenant.ID,
@@ -592,6 +645,7 @@ func (h *Handler) uploadPackageFile(c *gin.Context) {
 		VersionMetadataJSON: string(metaJSON),
 		Filename:            filename,
 		IsLead:              true,
+		CreatedVia:          models.CreatedViaUploaded,
 	}, buf)
 	if err != nil {
 		if errors.Is(err, models.ErrDuplicatePackageVersion) {
@@ -688,6 +742,15 @@ func (h *Handler) subjectFor(tenant *tenants.Tenant, pkg *models.Package, ver *m
 		s.Attrs = map[string]any{
 			"created_unix":       ver.CreatedUnix,
 			"ingest_age_seconds": time.Now().Unix() - ver.CreatedUnix,
+		}
+		// Surface upstream publish time when pullThroughIngest stamped
+		// it on the row. Cooldown rules with time_source=upstream_publish
+		// read this; absent the attribute they fall back to ingest age,
+		// which incorrectly trips for any version freshly ingested via
+		// pull-through (ingest_age_seconds==0 even when the upstream
+		// publish was years ago). Matches the PyPI + Go handlers.
+		if ver.UpstreamPublishedUnix.Valid {
+			s.Attrs["upstream_published_unix"] = ver.UpstreamPublishedUnix.Int64
 		}
 		if ver.License.Valid && ver.License.String != "" {
 			s.Attrs["license"] = ver.License.String

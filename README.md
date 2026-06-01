@@ -36,7 +36,7 @@ Each format has two independent capability axes:
 | `go` (Go module proxy) | shipped | **shipped** | `GOPROXY` v1 protocol; pull-through against proxy.golang.org with policy gating on cold path. `.info` `Time` field populates `upstream_published_unix` inline (no second-hop). sumdb passthrough not yet implemented — leave `GOSUMDB=sum.golang.org` (its default). |
 | `pypi` | shipped | **shipped** | wheel + sdist upload, PEP 503 simple index, PEP 691 JSON; pull-through against pypi.org with policy gating on cold path |
 | `npm` | shipped | planned | publish, packument, tarball download, dist-tags, scoped packages |
-| `rubygems` | shipped | planned | `gem push` / `gem install`, compact index, legacy `specs.4.8.gz`, yank |
+| `rubygems` | shipped | **shipped** | `gem push` / `gem install`, compact index, legacy `specs.4.8.gz`, yank; pull-through against rubygems.org with policy gating on cold path. `/api/v1/versions/<name>.json` fan-out hydrates `upstream_published_unix` for the `/info/<name>` filter (one round-trip per cold package). v1 ships ruby-platform gems only on cold miss; platform-tagged filenames (`-x86_64-linux.gem` etc.) require `gem push`. |
 | `container` (OCI) | shipped | planned | OCI distribution v1.1: manifests, blobs (monolithic + chunked), tags, token-exchange auth dance |
 | `generic` | shipped | not planned | PUT/GET/DELETE arbitrary blobs at `<name>/<version>/<filename>`. No upstream by definition. |
 | `alpine` | shipped | planned | `apk add` / `apk update`, signed APKINDEX.tar.gz, per-tenant RSA key |

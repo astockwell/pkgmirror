@@ -49,7 +49,7 @@ var defaultUpstreams = map[string]DefaultUpstream{
 	"rubygems": {
 		URL:                  "https://rubygems.org",
 		Hosts:                []string{"rubygems.org", "index.rubygems.org"},
-		PullThroughSupported: false, // PR H
+		PullThroughSupported: true, // PR H
 	},
 	"maven": {
 		URL:                  "https://repo.maven.apache.org/maven2",

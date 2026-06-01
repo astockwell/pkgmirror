@@ -93,7 +93,7 @@ func New(d Deps) (*gin.Engine, error) {
 	goproxy.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).WithUpstream(d.Upstream).Register(apiBase.Group("/go"))
 	pypi.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).WithUpstream(d.Upstream).Register(apiBase.Group("/pypi"))
 	npm.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/npm"))
-	rubygems.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/rubygems"))
+	rubygems.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).WithUpstream(d.Upstream).Register(apiBase.Group("/rubygems"))
 	generic.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/generic"))
 	alpine.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/alpine"))
 	maven.NewHandler(d.Service, d.Models, d.Tenants, d.Engine).Register(apiBase.Group("/maven"))
