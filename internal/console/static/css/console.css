@@ -27,7 +27,7 @@
   --danger: #b91c1c;
   --info: #0369a1;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.06);
-  --radius: 6px;
+  --radius: 0;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
@@ -70,7 +70,6 @@ code, pre {
   font-size: 0.9em;
   background: var(--card-bg);
   border: 1px solid var(--border);
-  border-radius: 4px;
   padding: 1px 4px;
 }
 
@@ -265,19 +264,32 @@ code, pre {
   margin-bottom: 16px;
 }
 .flash {
+  position: relative;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   padding: 10px 14px;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
   background: var(--card-bg);
 }
-.flash-info { border-left: 3px solid var(--info); }
-.flash-success { border-left: 3px solid var(--success); }
-.flash-warning { border-left: 3px solid var(--warning); }
-.flash-danger { border-left: 3px solid var(--danger); }
+/* Severity accent: bottom-right corner triangle, in place of the
+   previous border-left bar. Sized to be readable at a glance without
+   competing with the content text. */
+.flash::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  height: 12px;
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+  pointer-events: none;
+}
+.flash-info::after    { background: var(--info); }
+.flash-success::after { background: var(--success); }
+.flash-warning::after { background: var(--warning); }
+.flash-danger::after  { background: var(--danger); }
 .flash-text { flex: 1; }
 .flash-dismiss {
   background: transparent;
@@ -291,16 +303,26 @@ code, pre {
 
 /* ---- Alert ---- */
 .alert {
+  position: relative;
   padding: 12px 16px;
-  border-radius: var(--radius);
   border: 1px solid var(--border);
   background: var(--card-bg);
   margin-bottom: 12px;
 }
-.alert-info { border-left: 3px solid var(--info); }
-.alert-success { border-left: 3px solid var(--success); }
-.alert-warning { border-left: 3px solid var(--warning); }
-.alert-danger { border-left: 3px solid var(--danger); }
+.alert::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  height: 12px;
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+  pointer-events: none;
+}
+.alert-info::after    { background: var(--info); }
+.alert-success::after { background: var(--success); }
+.alert-warning::after { background: var(--warning); }
+.alert-danger::after  { background: var(--danger); }
 .alert-title { font-weight: 600; margin-bottom: 4px; }
 .alert-body { font-size: 0.9rem; color: var(--muted-fg); }
 
