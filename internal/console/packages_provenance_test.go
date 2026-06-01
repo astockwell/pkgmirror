@@ -37,7 +37,7 @@ func TestPackageSetProvenance_AdminFlipsPullThroughToUploaded(t *testing.T) {
 
 	resp := f.PostFormFrom(t,
 		"/console/tenants/team/packages/npm/left-pad",
-		"/console/tenants/team/packages/npm/left-pad/provenance",
+		"/console/packages/"+itoa(pkg.ID)+"/provenance",
 		url.Values{"created_via": {"uploaded"}})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
@@ -76,7 +76,7 @@ func TestPackageSetProvenance_RejectsInvalidValue(t *testing.T) {
 
 	resp := f.PostFormFrom(t,
 		"/console/tenants/team/packages/npm/left-pad",
-		"/console/tenants/team/packages/npm/left-pad/provenance",
+		"/console/packages/"+itoa(pkg.ID)+"/provenance",
 		url.Values{"created_via": {"bogus_value"}})
 	defer resp.Body.Close()
 	// RenderError returns a 5xx error page; the important assertion
@@ -117,9 +117,19 @@ func TestPackageSetProvenance_NonAdminGets403(t *testing.T) {
 	makeTestPackage(t, f, "team", "npm", "left-pad", "1.0.0")
 	f.loginAs(t, "bob", "correct-password-12chars")
 
+	// Look up the seeded package so we can hit its ID-keyed URL. The
+	// gating we're testing is the system-admin middleware - a real
+	// non-admin user has no way to find this ID either, but the route
+	// MUST reject any non-admin POST regardless of whether the ID is
+	// guessable.
+	pkg, err := f.Models.GetPackage(ctx, tenantID(t, f, "team"), models.Type("npm"), "left-pad")
+	if err != nil {
+		t.Fatalf("look up seeded package: %v", err)
+	}
+
 	resp := f.PostFormFrom(t,
 		"/console/profile",
-		"/console/tenants/team/packages/npm/left-pad/provenance",
+		"/console/packages/"+itoa(pkg.ID)+"/provenance",
 		url.Values{"created_via": {"pull_through"}})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
@@ -149,8 +159,10 @@ func TestPackageDetail_ShowsProvenanceBadge(t *testing.T) {
 	if !strings.Contains(body, "mirrored from upstream") {
 		t.Errorf("expected provenance badge text in detail body; got %s", body)
 	}
-	// Admin should see a flip form pointing at the provenance endpoint.
-	if !strings.Contains(body, "/packages/pypi/requests/provenance") {
-		t.Errorf("expected provenance flip form in admin view; got %s", body)
+	// Admin should see a flip form pointing at the ID-keyed provenance
+	// endpoint.
+	wantAction := "/console/packages/" + itoa(pkg.ID) + "/provenance"
+	if !strings.Contains(body, wantAction) {
+		t.Errorf("expected provenance flip form action %q in admin view; got %s", wantAction, body)
 	}
 }

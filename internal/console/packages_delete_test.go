@@ -53,7 +53,7 @@ func TestPackageDelete_AdminCanDelete(t *testing.T) {
 
 	resp := f.PostFormFrom(t,
 		"/console/tenants/team/packages/npm/left-pad",
-		"/console/tenants/team/packages/npm/left-pad/delete",
+		"/console/packages/"+itoa(pkg.ID)+"/delete",
 		url.Values{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
@@ -87,14 +87,14 @@ func TestPackageDelete_NonAdminGets403(t *testing.T) {
 	u, _ := f.Users.Create(context.Background(), users.CreateOptions{Name: "bob"})
 	hash, _ := users.HashPassword("correct-password-12chars")
 	_ = f.Users.SetPasswordHash(context.Background(), u.ID, hash)
-	makeTestPackage(t, f, "team", "npm", "left-pad", "1.0.0")
+	pkg, _ := makeTestPackage(t, f, "team", "npm", "left-pad", "1.0.0")
 	f.loginAs(t, "bob", "correct-password-12chars")
 
 	// Prime via /console/profile which any signed-in user can GET.
 	// /console/login would 303-redirect for a logged-in user.
 	resp := f.PostFormFrom(t,
 		"/console/profile",
-		"/console/tenants/team/packages/npm/left-pad/delete",
+		"/console/packages/"+itoa(pkg.ID)+"/delete",
 		url.Values{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
@@ -108,11 +108,11 @@ func TestPackageDelete_NonAdminGets403(t *testing.T) {
 
 func TestPackageDelete_AnonRedirects(t *testing.T) {
 	f := newAuthFixture(t)
-	makeTestPackage(t, f, "team", "npm", "left-pad", "1.0.0")
+	pkg, _ := makeTestPackage(t, f, "team", "npm", "left-pad", "1.0.0")
 	// No login - POST attempt without CSRF first to confirm it gets
 	// gated before any business logic. Without CSRF token gorilla/csrf
 	// returns 403; that's the auth-chain order we want to pin.
-	resp := f.PostFormNoCSRF(t, "/console/tenants/team/packages/npm/left-pad/delete", url.Values{})
+	resp := f.PostFormNoCSRF(t, "/console/packages/"+itoa(pkg.ID)+"/delete", url.Values{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403 (CSRF), got %d", resp.StatusCode)
@@ -122,10 +122,10 @@ func TestPackageDelete_AnonRedirects(t *testing.T) {
 func TestPackageDelete_NoCSRFReturns403(t *testing.T) {
 	f := newAuthFixture(t)
 	f.CreateAdmin(t, "alice", "correct-password-12chars")
-	makeTestPackage(t, f, "team", "npm", "left-pad", "1.0.0")
+	pkg, _ := makeTestPackage(t, f, "team", "npm", "left-pad", "1.0.0")
 	f.loginAs(t, "alice", "correct-password-12chars")
 
-	resp := f.PostFormNoCSRF(t, "/console/tenants/team/packages/npm/left-pad/delete", url.Values{})
+	resp := f.PostFormNoCSRF(t, "/console/packages/"+itoa(pkg.ID)+"/delete", url.Values{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403 without CSRF, got %d", resp.StatusCode)
@@ -137,9 +137,10 @@ func TestPackageDelete_MissingPackage404(t *testing.T) {
 	f.CreateAdmin(t, "alice", "correct-password-12chars")
 	_, _ = f.Tenants.Create(context.Background(), "team", tenants.VisibilityPrivate)
 	f.loginAs(t, "alice", "correct-password-12chars")
+	// 999999 is a package_id that doesn't exist.
 	resp := f.PostFormFrom(t,
 		"/console/tenants/team/packages",
-		"/console/tenants/team/packages/npm/ghost/delete",
+		"/console/packages/999999/delete",
 		url.Values{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
@@ -156,7 +157,7 @@ func TestVersionDelete_AdminCanDelete(t *testing.T) {
 
 	resp := f.PostFormFrom(t,
 		"/console/tenants/team/packages/npm/left-pad",
-		"/console/tenants/team/packages/npm/left-pad/versions/"+itoa(target.ID)+"/delete",
+		"/console/packages/"+itoa(pkg.ID)+"/versions/"+itoa(target.ID)+"/delete",
 		url.Values{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
@@ -191,13 +192,13 @@ func TestVersionDelete_CrossPackage404(t *testing.T) {
 	f := newAuthFixture(t)
 	f.CreateAdmin(t, "alice", "correct-password-12chars")
 	_, versA := makeTestPackage(t, f, "team", "npm", "pkg-a", "1.0.0")
-	_, _ = makeTestPackage(t, f, "team", "npm", "pkg-b", "2.0.0")
+	pkgB, _ := makeTestPackage(t, f, "team", "npm", "pkg-b", "2.0.0")
 	f.loginAs(t, "alice", "correct-password-12chars")
 
 	// Try to delete pkg-a's version via pkg-b's path.
 	resp := f.PostFormFrom(t,
 		"/console/tenants/team/packages/npm/pkg-b",
-		"/console/tenants/team/packages/npm/pkg-b/versions/"+itoa(versA[0].ID)+"/delete",
+		"/console/packages/"+itoa(pkgB.ID)+"/versions/"+itoa(versA[0].ID)+"/delete",
 		url.Values{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
@@ -210,12 +211,12 @@ func TestVersionDelete_NonAdminGets403(t *testing.T) {
 	u, _ := f.Users.Create(context.Background(), users.CreateOptions{Name: "bob"})
 	hash, _ := users.HashPassword("correct-password-12chars")
 	_ = f.Users.SetPasswordHash(context.Background(), u.ID, hash)
-	_, vers := makeTestPackage(t, f, "team", "npm", "left-pad", "1.0.0")
+	pkg, vers := makeTestPackage(t, f, "team", "npm", "left-pad", "1.0.0")
 	f.loginAs(t, "bob", "correct-password-12chars")
 
 	resp := f.PostFormFrom(t,
 		"/console/profile",
-		"/console/tenants/team/packages/npm/left-pad/versions/"+itoa(vers[0].ID)+"/delete",
+		"/console/packages/"+itoa(pkg.ID)+"/versions/"+itoa(vers[0].ID)+"/delete",
 		url.Values{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {

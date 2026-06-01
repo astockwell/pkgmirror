@@ -165,6 +165,11 @@ type versionRow struct {
 }
 
 // packageDetail shows one package's versions inside a tenant.
+//
+// :pkgname is a catch-all (see route registration) so module paths
+// containing slashes (e.g. Go's "rsc.io/quote") survive routing.
+// gc.Param("pkgname") returns the captured suffix with the leading
+// slash still attached - strip it before lookup.
 func (c *Console) packageDetail(gc *gin.Context) {
 	ctx := gc.Request.Context()
 	id := auth.FromContext(gc)
@@ -177,7 +182,7 @@ func (c *Console) packageDetail(gc *gin.Context) {
 		return
 	}
 	pkgType := gc.Param("type")
-	pkgName := gc.Param("pkgname")
+	pkgName := strings.TrimPrefix(gc.Param("pkgname"), "/")
 	if pkgType == "" || pkgName == "" {
 		c.RenderNotFound(gc, "package not specified")
 		return
@@ -375,28 +380,33 @@ func (c *Console) auditQuarantine(gc *gin.Context, id *auth.Identity, action str
 // row. Properties hanging off any of those are cleaned up too (see
 // models.DeletePackage). Audit row emitted before mutation so an op
 // failure still leaves a forensic trail.
+//
+// Routed by :package_id rather than (tenant, type, name) because the
+// GET show page uses a *pkgname catch-all and Gin/httprouter forbid
+// sibling routes under one. The handler resolves the package row first,
+// then derives the tenant for the redirect target. System-admin gating
+// is enforced by the route group.
 func (c *Console) packageDelete(gc *gin.Context) {
 	ctx := gc.Request.Context()
 	id := auth.FromContext(gc)
 
-	t, ok := c.resolveTenantFromPath(gc)
-	if !ok {
-		return
-	}
-	pkgType := gc.Param("type")
-	pkgName := gc.Param("pkgname")
-	if pkgType == "" || pkgName == "" {
+	pkgID, err := strconv.ParseInt(gc.Param("package_id"), 10, 64)
+	if err != nil || pkgID <= 0 {
 		c.RenderNotFound(gc, "package not specified")
 		return
 	}
-
-	pkg, err := c.models.GetPackage(ctx, t.ID, models.Type(pkgType), pkgName)
+	pkg, err := c.models.GetPackageByID(ctx, pkgID)
 	if err != nil {
 		if errors.Is(err, models.ErrPackageNotExist) {
-			c.RenderNotFound(gc, "package %s/%s not found in tenant %s", pkgType, pkgName, t.Name)
+			c.RenderNotFound(gc, "package #%d not found", pkgID)
 			return
 		}
 		c.RenderError(gc, "look up package", err)
+		return
+	}
+	t, err := c.tenants.GetByID(ctx, pkg.TenantID)
+	if err != nil {
+		c.RenderError(gc, "look up tenant", err)
 		return
 	}
 	// Count versions for the audit row + flash message before we drop.
@@ -419,23 +429,20 @@ func (c *Console) packageDelete(gc *gin.Context) {
 }
 
 // packageSetProvenance is the admin override for packages.created_via.
-// Looks up the package by (tenant, type, name), validates the new
-// value against models.CreatedVia.Valid(), persists, and audits.
+// Looks up the package by ID, validates the new value against
+// models.CreatedVia.Valid(), persists, and audits.
 // Per plans/created-via-package-ownership.md, the security-relevant
 // implication ('pull_through' enables the /simple/ merge and the
 // upload-against-pull_through 409) is shown in the form's confirm
 // dialog rather than buried in a tooltip.
+//
+// Routed by :package_id; see packageDelete for the rationale.
 func (c *Console) packageSetProvenance(gc *gin.Context) {
 	ctx := gc.Request.Context()
 	id := auth.FromContext(gc)
 
-	t, ok := c.resolveTenantFromPath(gc)
-	if !ok {
-		return
-	}
-	pkgType := gc.Param("type")
-	pkgName := gc.Param("pkgname")
-	if pkgType == "" || pkgName == "" {
+	pkgID, err := strconv.ParseInt(gc.Param("package_id"), 10, 64)
+	if err != nil || pkgID <= 0 {
 		c.RenderNotFound(gc, "package not specified")
 		return
 	}
@@ -447,13 +454,18 @@ func (c *Console) packageSetProvenance(gc *gin.Context) {
 		return
 	}
 
-	pkg, err := c.models.GetPackage(ctx, t.ID, models.Type(pkgType), pkgName)
+	pkg, err := c.models.GetPackageByID(ctx, pkgID)
 	if err != nil {
 		if errors.Is(err, models.ErrPackageNotExist) {
-			c.RenderNotFound(gc, "package %s/%s not found in tenant %s", pkgType, pkgName, t.Name)
+			c.RenderNotFound(gc, "package #%d not found", pkgID)
 			return
 		}
 		c.RenderError(gc, "look up package", err)
+		return
+	}
+	t, err := c.tenants.GetByID(ctx, pkg.TenantID)
+	if err != nil {
+		c.RenderError(gc, "look up tenant", err)
 		return
 	}
 	old := pkg.CreatedVia
@@ -474,38 +486,44 @@ func (c *Console) packageSetProvenance(gc *gin.Context) {
 		fmt.Sprintf("Provenance for %s/%s set to %q.",
 			pkg.Type, pkg.Name, provenanceLabel(newVia)))
 	gc.Redirect(http.StatusSeeOther,
-		"/console/tenants/"+t.Name+"/packages/"+pkgType+"/"+pkgName)
+		"/console/tenants/"+t.Name+"/packages/"+string(pkg.Type)+"/"+pkg.Name)
 }
 
 // versionDelete drops a single version from a package; the package row
 // itself stays. Version's files (CASCADE) and any properties on the
 // version + its files (transactional cleanup in models.DeleteVersion)
-// go too. Path param :version_id must belong to the named package -
-// we enforce that to stop an admin in tenant A from deleting a version
-// belonging to tenant B by guessing IDs.
+// go too. :version_id must belong to the named :package_id - we
+// enforce that to stop an admin from deleting a foreign version by
+// guessing IDs.
+//
+// Routed by :package_id; see packageDelete for the rationale.
 func (c *Console) versionDelete(gc *gin.Context) {
 	ctx := gc.Request.Context()
 	id := auth.FromContext(gc)
 
-	t, ok := c.resolveTenantFromPath(gc)
-	if !ok {
+	pkgID, err := strconv.ParseInt(gc.Param("package_id"), 10, 64)
+	if err != nil || pkgID <= 0 {
+		c.RenderNotFound(gc, "package not specified")
 		return
 	}
-	pkgType := gc.Param("type")
-	pkgName := gc.Param("pkgname")
 	versionID, err := strconv.ParseInt(gc.Param("version_id"), 10, 64)
 	if err != nil || versionID <= 0 {
 		c.RenderNotFound(gc, "version not specified")
 		return
 	}
 
-	pkg, err := c.models.GetPackage(ctx, t.ID, models.Type(pkgType), pkgName)
+	pkg, err := c.models.GetPackageByID(ctx, pkgID)
 	if err != nil {
 		if errors.Is(err, models.ErrPackageNotExist) {
-			c.RenderNotFound(gc, "package %s/%s not found in tenant %s", pkgType, pkgName, t.Name)
+			c.RenderNotFound(gc, "package #%d not found", pkgID)
 			return
 		}
 		c.RenderError(gc, "look up package", err)
+		return
+	}
+	t, err := c.tenants.GetByID(ctx, pkg.TenantID)
+	if err != nil {
+		c.RenderError(gc, "look up tenant", err)
 		return
 	}
 
@@ -525,7 +543,7 @@ func (c *Console) versionDelete(gc *gin.Context) {
 		}
 	}
 	if match == nil {
-		c.RenderNotFound(gc, "version #%d does not belong to package %s/%s", versionID, pkgType, pkgName)
+		c.RenderNotFound(gc, "version #%d does not belong to package %s/%s", versionID, pkg.Type, pkg.Name)
 		return
 	}
 
@@ -543,7 +561,7 @@ func (c *Console) versionDelete(gc *gin.Context) {
 	middleware.AddFlash(gc, middleware.FlashSuccess,
 		fmt.Sprintf("Deleted version %s of %s/%s.", match.Version, pkg.Type, pkg.Name))
 	gc.Redirect(http.StatusSeeOther,
-		"/console/tenants/"+t.Name+"/packages/"+pkgType+"/"+pkgName)
+		"/console/tenants/"+t.Name+"/packages/"+string(pkg.Type)+"/"+pkg.Name)
 }
 
 // auditPackage records a package- or version-scoped admin action.

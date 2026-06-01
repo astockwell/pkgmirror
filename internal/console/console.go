@@ -196,7 +196,22 @@ func (c *Console) Register(r *gin.Engine) error {
 	authed.GET("/tenants", c.tenantsList)
 	authed.GET("/tenants/:name", c.tenantDetail)
 	authed.GET("/tenants/:name/packages", c.packagesByTenant)
-	authed.GET("/tenants/:name/packages/:type/:pkgname", c.packageDetail)
+	// Package detail uses a catch-all on *pkgname so module paths
+	// containing slashes (e.g. Go's "rsc.io/quote", scoped npm
+	// packages like "@scope/name") survive routing. Gin's default
+	// `:pkgname` only matches a single path segment - hitting
+	// /packages/go/rsc.io/quote with that route returns 404.
+	//
+	// Forgejo's package routes do the same thing in spirit but via
+	// chi's UseEncodedPath + url.PathEscape() in templates; Gin has
+	// no equivalent so we have to use the catch-all form here. The
+	// handler strips the leading "/" from gc.Param("pkgname") before
+	// the lookup. See packageDetail in packages.go.
+	//
+	// Catch-all + sibling routes are forbidden by httprouter, so the
+	// destructive POST actions below live at /packages/:package_id/...
+	// instead of being nested under this same prefix.
+	authed.GET("/tenants/:name/packages/:type/*pkgname", c.packageDetail)
 
 	// Global cross-tenant packages list (sidebar Packages link).
 	// Same access model as /tenants: rows filtered by CanRead.
@@ -212,9 +227,16 @@ func (c *Console) Register(r *gin.Engine) error {
 	// with CSRF; the templates wrap the trigger in a JS confirm()
 	// prompt. Blobs themselves are kept (content-addressed); GC is a
 	// future pass.
-	adminOnly.POST("/tenants/:name/packages/:type/:pkgname/delete", c.packageDelete)
-	adminOnly.POST("/tenants/:name/packages/:type/:pkgname/provenance", c.packageSetProvenance)
-	adminOnly.POST("/tenants/:name/packages/:type/:pkgname/versions/:version_id/delete", c.versionDelete)
+	//
+	// Mounted by :package_id (not by tenant/type/name) because the
+	// GET show page above uses a *pkgname catch-all, and Gin/httprouter
+	// forbid sibling routes sharing a prefix with a catch-all. Each
+	// handler looks the package up by ID, then derives the tenant
+	// from the row for the redirect target; tenant scope is still
+	// enforced via the system-admin gate above.
+	adminOnly.POST("/packages/:package_id/delete", c.packageDelete)
+	adminOnly.POST("/packages/:package_id/provenance", c.packageSetProvenance)
+	adminOnly.POST("/packages/:package_id/versions/:version_id/delete", c.versionDelete)
 
 	// Upstream pull-through (system admin only; the host allowlist is
 	// NOT editable here on purpose - see plans/upstream-pull-through.md

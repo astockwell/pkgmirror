@@ -38,7 +38,7 @@
         {{ if $.Body.CanManage }}
         <td>
           <form method="post"
-                action="/console/tenants/{{ $.Body.Tenant.Name }}/packages/{{ .Type }}/{{ .Name }}/delete"
+                action="/console/packages/{{ .PackageID }}/delete"
                 style="display:inline">
             {{ $.Base.CSRFField }}
             <button type="submit" class="btn btn-ghost btn-sm"

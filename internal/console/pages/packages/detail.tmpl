@@ -17,7 +17,7 @@
     {{ if .Body.CanManage }}
     <div style="margin-top:8px">
       <form method="post"
-            action="/console/tenants/{{ .Body.Tenant.Name }}/packages/{{ .Body.Package.Type }}/{{ .Body.Package.Name }}/delete"
+            action="/console/packages/{{ .Body.Package.ID }}/delete"
             style="display:inline">
         {{ .Base.CSRFField }}
         <button type="submit" class="btn btn-ghost btn-sm"
@@ -25,7 +25,7 @@
       </form>
       {{ if .Body.ProvenanceFlipTarget }}
       <form method="post"
-            action="/console/tenants/{{ .Body.Tenant.Name }}/packages/{{ .Body.Package.Type }}/{{ .Body.Package.Name }}/provenance"
+            action="/console/packages/{{ .Body.Package.ID }}/provenance"
             style="display:inline">
         {{ .Base.CSRFField }}
         <input type="hidden" name="created_via" value="{{ .Body.ProvenanceFlipTarget }}">
@@ -75,7 +75,7 @@
         {{ if $.Body.CanManage }}
         <td>
           <form method="post"
-                action="/console/tenants/{{ $.Body.Tenant.Name }}/packages/{{ $.Body.Package.Type }}/{{ $.Body.Package.Name }}/versions/{{ .VersionID }}/delete"
+                action="/console/packages/{{ $.Body.Package.ID }}/versions/{{ .VersionID }}/delete"
                 style="display:inline">
             {{ $.Base.CSRFField }}
             <button type="submit" class="btn btn-ghost btn-sm"

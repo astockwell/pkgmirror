@@ -62,6 +62,55 @@ func TestPackageDetail_ShowsVersions(t *testing.T) {
 	}
 }
 
+// TestPackageDetail_GoModuleWithSlashInName covers the bug where the
+// package detail show page returned 404 for Go module paths like
+// "rsc.io/quote" because Gin's `:pkgname` only matches a single path
+// segment. The fix uses a *pkgname catch-all on the GET route so
+// arbitrary slash-containing module paths survive routing. Reading
+// gc.Param("pkgname") returns "/rsc.io/quote" (with leading slash);
+// the handler strips it before the lookup.
+func TestPackageDetail_GoModuleWithSlashInName(t *testing.T) {
+	f := newAuthFixture(t)
+	f.CreateAdmin(t, "alice", "correct-password-12chars")
+	// The schema migration auto-seeds a "default" tenant, so fetch
+	// it rather than trying (and failing) to create another.
+	tenant, err := f.Tenants.GetByName(context.Background(), "default")
+	if err != nil {
+		t.Fatalf("get default tenant: %v", err)
+	}
+	pkg, err := f.Models.GetOrCreatePackage(context.Background(),
+		tenant.ID, models.Type("go"), "rsc.io/quote", models.CreatedViaPullThrough)
+	if err != nil {
+		t.Fatalf("create package: %v", err)
+	}
+	if _, err := f.Models.CreateVersion(context.Background(), pkg.ID, "v1.5.2", "{}"); err != nil {
+		t.Fatalf("create version: %v", err)
+	}
+	f.loginAs(t, "alice", "correct-password-12chars")
+
+	// Plain URL with literal slashes in the module path - this is what
+	// browsers will resolve when a user clicks a link generated from
+	// the packages list. Pre-fix this returned 404.
+	resp, body := f.Get(t, "/console/tenants/default/packages/go/rsc.io/quote")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for go/rsc.io/quote, got %d body=%s", resp.StatusCode, body)
+	}
+	for _, want := range []string{"rsc.io/quote", "v1.5.2"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in body", want)
+		}
+	}
+
+	// Defense-in-depth: percent-encoded form (%2F) should also resolve
+	// - some clients (including Forgejo-style links) encode the slash.
+	// Gin normalizes the path before matching, so this exercises the
+	// same catch-all branch via a different input.
+	resp2, body2 := f.Get(t, "/console/tenants/default/packages/go/rsc.io%2Fquote")
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for go/rsc.io%%2Fquote, got %d body=%s", resp2.StatusCode, body2)
+	}
+}
+
 func TestQuarantine_PromoteFlow(t *testing.T) {
 	f := newAuthFixture(t)
 	f.CreateAdmin(t, "alice", "correct-password-12chars")
